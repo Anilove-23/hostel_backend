@@ -80,6 +80,7 @@ CREATE TABLE admin (
     email VARCHAR(255) UNIQUE NOT NULL,
     password_hash VARCHAR(255) NOT NULL,
     authority_level INTEGER NOT NULL CHECK (authority_level IN (1,2,3)),
+    hostel VARCHAR(255) REFERENCES hostel(name),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -92,6 +93,11 @@ CREATE TABLE hostel (
     is_paused BOOLEAN DEFAULT FALSE,
     allocation_date TIMESTAMP WITH TIME ZONE,
     lobby_opens_at TIMESTAMP WITH TIME ZONE,
+    -- From/To hostel mapping for cross-hostel allocation:
+    -- target_hostel_id: rooms from this hostel will be shown/allocated to students of THIS hostel
+    target_hostel_id UUID REFERENCES hostel(id) ON DELETE SET NULL,
+    -- source_hostel_id: reverse link — students from this hostel are being allocated into THIS hostel
+    source_hostel_id UUID REFERENCES hostel(id) ON DELETE SET NULL,
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -126,7 +132,7 @@ CREATE TABLE student (
     id SERIAL PRIMARY KEY,
     name VARCHAR(255) NOT NULL,
     father_name VARCHAR(255),
-    email VARCHAR(255) UNIQUE NOT NULL,
+    email VARCHAR(255) UNIQUE,
     password VARCHAR(255),
     hostel VARCHAR(255) NOT NULL,
     hostel_id UUID NOT NULL REFERENCES hostel(id) ON DELETE CASCADE,

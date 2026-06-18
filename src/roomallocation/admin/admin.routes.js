@@ -9,10 +9,35 @@
 
 import express from 'express';
 import jwt from 'jsonwebtoken';
+import multer from 'multer';
+import path from 'path';
+import fs from 'fs';
 import pool from '../../db/pool.js';
 import { setCurrentPhase } from '../services/phase.service.js';
+import { previewRankUpdate, executeRankUpdate } from '../services/rankUpdate.service.js';
 
 const router = express.Router();
+
+// ─── Multer setup for rank/CGPA CSV upload ────────────────────────────────────
+
+const tempDir = 'uploads/temp/';
+if (!fs.existsSync(tempDir)) fs.mkdirSync(tempDir, { recursive: true });
+
+const rankUploadStorage = multer.diskStorage({
+    destination: tempDir,
+    filename: (req, file, cb) => {
+        const suffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+        cb(null, 'rank-' + suffix + path.extname(file.originalname));
+    },
+});
+const rankUpload = multer({
+    storage: rankUploadStorage,
+    fileFilter: (req, file, cb) => {
+        const ext = path.extname(file.originalname).toLowerCase();
+        if (['.csv', '.xls', '.xlsx'].includes(ext)) cb(null, true);
+        else cb(new Error('Unsupported file format. Use .csv, .xls or .xlsx'));
+    },
+});
 
 // ─── Admin Auth Middleware ────────────────────────────────────────────────────
 
@@ -50,7 +75,8 @@ router.get('/hostels', async (req, res) => {
     try {
         const result = await pool.query(
             `SELECT id, name, type, total_capacity, current_phase, is_paused,
-                    allocation_date, lobby_opens_at
+                    allocation_date, lobby_opens_at,
+                    target_hostel_id, source_hostel_id
              FROM hostel ORDER BY name ASC`
         );
         return res.json({ success: true, hostels: result.rows });
@@ -60,14 +86,19 @@ router.get('/hostels', async (req, res) => {
 });
 
 // ─── POST /api/admin/set-allocation-date ─────────────────────────────────────
+//
+// Body:
+//   fromHostelId   — the hostel whose STUDENTS will participate in this cycle
+//   toHostelId     — the hostel whose ROOMS will be shown and allocated
+//   allocationDate — YYYY-MM-DD string; must be a Saturday
 
 router.post('/set-allocation-date', async (req, res) => {
-    const { hostelId, allocationDate } = req.body;
+    const { fromHostelId, toHostelId, allocationDate } = req.body;
 
-    if (!hostelId || !allocationDate) {
+    if (!fromHostelId || !toHostelId || !allocationDate) {
         return res.status(400).json({
             success: false,
-            message: 'hostelId and allocationDate are required'
+            message: 'fromHostelId, toHostelId, and allocationDate are required'
         });
     }
 
@@ -85,22 +116,53 @@ router.post('/set-allocation-date', async (req, res) => {
     lobbyDate.setUTCDate(lobbyDate.getUTCDate() - 5);
     lobbyDate.setUTCHours(3, 30, 0, 0); // 9:00 AM IST = 3:30 AM UTC
 
+    const client = await pool.connect();
     try {
-        const result = await pool.query(
-            `UPDATE hostel
-             SET allocation_date = $1, lobby_opens_at = $2
-             WHERE id = $3
-             RETURNING id, name, allocation_date, lobby_opens_at, current_phase`,
-            [allocationDate, lobbyDate.toISOString(), hostelId]
-        );
+        await client.query('BEGIN');
 
-        if (result.rowCount === 0) {
-            return res.status(404).json({ success: false, message: 'Hostel not found' });
+        // Verify both hostels exist
+        const fromRes = await client.query('SELECT id, name FROM hostel WHERE id = $1', [fromHostelId]);
+        if (fromRes.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, message: 'From-hostel not found' });
         }
 
-        return res.json({ success: true, hostel: result.rows[0] });
+        const toRes = await client.query('SELECT id, name FROM hostel WHERE id = $1', [toHostelId]);
+        if (toRes.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, message: 'To-hostel not found' });
+        }
+
+        // Update the FROM hostel: set allocation schedule + target link
+        const fromUpdate = await client.query(
+            `UPDATE hostel
+             SET allocation_date    = $1,
+                 lobby_opens_at     = $2,
+                 target_hostel_id   = $3
+             WHERE id = $4
+             RETURNING id, name, allocation_date, lobby_opens_at, current_phase,
+                       target_hostel_id`,
+            [allocationDate, lobbyDate.toISOString(), toHostelId, fromHostelId]
+        );
+
+        // Update the TO hostel: set reverse source link
+        await client.query(
+            `UPDATE hostel SET source_hostel_id = $1 WHERE id = $2`,
+            [fromHostelId, toHostelId]
+        );
+
+        await client.query('COMMIT');
+
+        return res.json({
+            success: true,
+            fromHostel: fromUpdate.rows[0],
+            toHostel: { id: toRes.rows[0].id, name: toRes.rows[0].name },
+        });
     } catch (err) {
+        await client.query('ROLLBACK');
         return res.status(500).json({ success: false, message: err.message });
+    } finally {
+        client.release();
     }
 });
 
@@ -109,8 +171,15 @@ router.post('/set-allocation-date', async (req, res) => {
 router.get('/allocation-status/:hostelId', async (req, res) => {
     try {
         const hostelRes = await pool.query(
-            `SELECT id, name, current_phase, is_paused, allocation_date, lobby_opens_at
-             FROM hostel WHERE id = $1`,
+            `SELECT h.id, h.name, h.current_phase, h.is_paused,
+                    h.allocation_date, h.lobby_opens_at,
+                    h.target_hostel_id, h.source_hostel_id,
+                    th.name AS target_hostel_name,
+                    sh.name AS source_hostel_name
+             FROM hostel h
+             LEFT JOIN hostel th ON th.id = h.target_hostel_id
+             LEFT JOIN hostel sh ON sh.id = h.source_hostel_id
+             WHERE h.id = $1`,
             [req.params.hostelId]
         );
         if (hostelRes.rowCount === 0) {
@@ -152,6 +221,37 @@ router.post('/trigger-phase', async (req, res) => {
     try {
         const updated = await setCurrentPhase(hostelId, phase);
         return res.json({ success: true, hostel: updated });
+    } catch (err) {
+        return res.status(err.statusCode || 500).json({ success: false, message: err.message });
+    }
+});
+
+// ─── POST /api/admin/rank-update/upload ──────────────────────────────────────
+// Step 1: Upload CSV/XLSX and preview auto-detected column mappings
+
+router.post('/rank-update/upload', rankUpload.single('file'), async (req, res) => {
+    try {
+        if (!req.file) {
+            return res.status(400).json({ success: false, message: 'No file uploaded' });
+        }
+        const result = await previewRankUpdate(req.file.path, req.file.filename);
+        return res.json({ success: true, ...result });
+    } catch (err) {
+        return res.status(err.statusCode || 500).json({ success: false, message: err.message });
+    }
+});
+
+// ─── POST /api/admin/rank-update/confirm ─────────────────────────────────────
+// Step 2: Confirm and execute the rank + CGPA update
+
+router.post('/rank-update/confirm', async (req, res) => {
+    try {
+        const { fileId, mappings } = req.body;
+        if (!fileId || !mappings) {
+            return res.status(400).json({ success: false, message: 'fileId and mappings are required' });
+        }
+        const result = await executeRankUpdate(fileId, mappings);
+        return res.json({ success: true, ...result });
     } catch (err) {
         return res.status(err.statusCode || 500).json({ success: false, message: err.message });
     }
