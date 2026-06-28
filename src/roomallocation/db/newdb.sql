@@ -220,6 +220,26 @@ CREATE TABLE room_assignment (
     CHECK (valid_until IS NULL OR valid_from IS NULL OR valid_until >= valid_from)
 );
 
+-- ─── Allocation Room Pool ─────────────────────────────────────────────────────
+-- Replaces the single target_hostel_id FK on the hostel table with a
+-- granular, room-level pool that can span multiple TO hostels.
+--
+-- Design:
+--   • source_hostel_id — the FROM hostel (whose students participate)
+--   • room_id          — one room included in that hostel's pool
+--   • Multiple FROM hostels may reference rooms from the same TO hostel
+--     as long as they don't share the exact same rooms for the same cycle.
+--   • target_hostel_id on hostel is KEPT for display / backward compat
+--     but is no longer the engine's source of truth.
+CREATE TABLE allocation_room_pool (
+    id               UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    source_hostel_id UUID NOT NULL REFERENCES hostel(id) ON DELETE CASCADE,
+    room_id          UUID NOT NULL REFERENCES room(id)   ON DELETE CASCADE,
+    created_at       TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(source_hostel_id, room_id)
+);
+
+
 
 -- =========================================================
 -- 5. STAFF, COMPLAINTS, AND LOGISTICS (Original Schema 1)
@@ -311,6 +331,10 @@ CREATE INDEX idx_student_individual_rank ON student(individual_rank);
 CREATE INDEX idx_housing_group_batch_id ON housing_group(batch_id);
 CREATE INDEX idx_housing_group_group_rank ON housing_group(group_rank);
 CREATE INDEX idx_room_occupancy ON room(max_capacity, current_occupancy);
+
+-- Allocation Room Pool
+CREATE INDEX idx_arp_source ON allocation_room_pool(source_hostel_id);
+CREATE INDEX idx_arp_room   ON allocation_room_pool(room_id);
 
 CREATE UNIQUE INDEX idx_unique_active_assignment ON room_assignment(student_id) WHERE assignment_status = 'ACTIVE';
 CREATE UNIQUE INDEX idx_unique_upcoming_assignment ON room_assignment(student_id) WHERE assignment_status = 'UPCOMING';

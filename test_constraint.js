@@ -1,6 +1,7 @@
 import pool from './src/db/pool.js';
 import { getUnassignedFirstYearStudents } from './src/roomallocation/first-year-allocation/studentPool.service.js';
 import { matchConstraints } from './src/roomallocation/first-year-allocation/constraintMatcher.js';
+import { executeBulkAllocation } from './src/roomallocation/first-year-allocation/bulkAllocator.js';
 
 async function runTest() {
     try {
@@ -72,12 +73,17 @@ async function runTest() {
                 });
                 count++;
             }
+
+            console.log("\nExecuting Bulk Allocation to save to database...");
+            const result = await executeBulkAllocation(allocations, hostelId);
+            console.log("Bulk Allocation Result:", result);
         }
 
     } catch (err) {
         console.error("Test Error:", err);
     } finally {
         await pool.end();
+        process.exit(0);
     }
 }
 

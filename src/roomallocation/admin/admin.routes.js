@@ -15,6 +15,7 @@ import fs from 'fs';
 import pool from '../../db/pool.js';
 import { setCurrentPhase } from '../services/phase.service.js';
 import { previewRankUpdate, executeRankUpdate } from '../services/rankUpdate.service.js';
+import { invalidateRooms } from '../../cache/roomCache.js';
 
 const router = express.Router();
 
@@ -85,7 +86,243 @@ router.get('/hostels', async (req, res) => {
     }
 });
 
+// ─── GET /api/admin/hostels-with-rooms ──────────────────────────────────────
+// Returns all hostels with their rooms, grouped for the pool configurator UI.
+
+router.get('/hostels-with-rooms', async (req, res) => {
+    try {
+        const hostelsRes = await pool.query(
+            `SELECT id, name, type FROM hostel ORDER BY name ASC`
+        );
+        const hostels = hostelsRes.rows;
+
+        if (hostels.length === 0) return res.json({ success: true, hostels: [] });
+
+        const hostelIds = hostels.map(h => h.id);
+        const roomsRes = await pool.query(
+            `SELECT id, hostel_id, room_number, block, room_type,
+                    max_capacity, current_occupancy
+             FROM room
+             WHERE hostel_id = ANY($1::uuid[])
+             ORDER BY hostel_id, block NULLS FIRST, room_number ASC`,
+            [hostelIds]
+        );
+
+        // Group rooms by hostel_id
+        const roomsByHostel = {};
+        for (const room of roomsRes.rows) {
+            if (!roomsByHostel[room.hostel_id]) roomsByHostel[room.hostel_id] = [];
+            roomsByHostel[room.hostel_id].push(room);
+        }
+
+        const result = hostels.map(h => ({
+            ...h,
+            rooms: roomsByHostel[h.id] ?? [],
+        }));
+
+        return res.json({ success: true, hostels: result });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
+// ─── POST /api/admin/set-allocation-pool ─────────────────────────────────────
+//
+// Configures a fully custom room pool for a FROM hostel.
+//
+// Body:
+//   fromHostelId   — the hostel whose STUDENTS will participate
+//   allocationDate — YYYY-MM-DD string; must be a Saturday
+//   hostels        — array of { hostelId, rooms: ['uuid',...] | 'ALL' }
+//                    rooms: 'ALL' means every room in that hostel;
+//                           array means specific room UUIDs only.
+
+router.post('/set-allocation-pool', async (req, res) => {
+    const { fromHostelId, allocationDate, hostels: toHostelEntries } = req.body;
+
+    if (!fromHostelId || !allocationDate || !Array.isArray(toHostelEntries) || toHostelEntries.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'fromHostelId, allocationDate, and at least one hostel entry are required'
+        });
+    }
+
+    // Validate Saturday
+    const date = new Date(allocationDate + 'T00:00:00Z');
+    if (date.getUTCDay() !== 6) {
+        return res.status(400).json({
+            success: false,
+            message: 'Allocation date must be a Saturday'
+        });
+    }
+
+    const lobbyDate = new Date(date);
+    lobbyDate.setUTCDate(lobbyDate.getUTCDate() - 5);
+    lobbyDate.setUTCHours(3, 30, 0, 0);
+
+    const client = await pool.connect();
+    try {
+        await client.query('BEGIN');
+
+        // Verify FROM hostel exists
+        const fromRes = await client.query('SELECT id, name FROM hostel WHERE id = $1', [fromHostelId]);
+        if (fromRes.rowCount === 0) {
+            await client.query('ROLLBACK');
+            return res.status(404).json({ success: false, message: 'From-hostel not found' });
+        }
+
+        // Collect all room IDs to add to the pool
+        let allRoomIds = [];
+        const hostelNames = [];
+
+        for (const entry of toHostelEntries) {
+            const { hostelId, rooms } = entry;
+
+            // Verify TO hostel exists
+            const toRes = await client.query('SELECT id, name FROM hostel WHERE id = $1', [hostelId]);
+            if (toRes.rowCount === 0) {
+                await client.query('ROLLBACK');
+                return res.status(404).json({ success: false, message: `To-hostel ${hostelId} not found` });
+            }
+            hostelNames.push(toRes.rows[0].name);
+
+            if (rooms === 'ALL') {
+                // Select all rooms in this hostel
+                const allRoomsRes = await client.query(
+                    `SELECT id FROM room WHERE hostel_id = $1`, [hostelId]
+                );
+                allRoomIds = allRoomIds.concat(allRoomsRes.rows.map(r => r.id));
+            } else if (Array.isArray(rooms) && rooms.length > 0) {
+                // Validate that every submitted room ID belongs to this hostel
+                const validRes = await client.query(
+                    `SELECT id FROM room WHERE id = ANY($1::uuid[]) AND hostel_id = $2`,
+                    [rooms, hostelId]
+                );
+                if (validRes.rowCount !== rooms.length) {
+                    const foundIds = new Set(validRes.rows.map(r => r.id));
+                    const invalid = rooms.filter(id => !foundIds.has(id));
+                    await client.query('ROLLBACK');
+                    return res.status(400).json({
+                        success: false,
+                        message: `Rooms not found in hostel ${toRes.rows[0].name}: ${invalid.join(', ')}`
+                    });
+                }
+                allRoomIds = allRoomIds.concat(rooms);
+            }
+        }
+
+        if (allRoomIds.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ success: false, message: 'Pool must contain at least one room' });
+        }
+
+        // Clear existing pool for this source hostel
+        await client.query(
+            `DELETE FROM allocation_room_pool WHERE source_hostel_id = $1`,
+            [fromHostelId]
+        );
+
+        // Insert new pool rows
+        const poolValues = allRoomIds.map((roomId, i) => `($1, $${i + 2})`).join(', ');
+        await client.query(
+            `INSERT INTO allocation_room_pool (source_hostel_id, room_id) VALUES ${poolValues}
+             ON CONFLICT (source_hostel_id, room_id) DO NOTHING`,
+            [fromHostelId, ...allRoomIds]
+        );
+
+        // Update FROM hostel — set allocation date, lobby open time
+        const fromUpdate = await client.query(
+            `UPDATE hostel
+             SET allocation_date  = $1,
+                 lobby_opens_at   = $2
+             WHERE id = $3
+             RETURNING id, name, allocation_date, lobby_opens_at, current_phase`,
+            [allocationDate, lobbyDate.toISOString(), fromHostelId]
+        );
+
+        await client.query('COMMIT');
+
+        // Invalidate rooms cache for every TO hostel so getLiveRoomMap
+        // returns fresh pool data on the next student/warden request.
+        // Matches the PG commit → Redis invalidate pattern from room.service.js.
+        for (const entry of toHostelEntries) {
+            await invalidateRooms(entry.hostelId).catch(() => {});
+        }
+
+        return res.json({
+            success: true,
+            fromHostel: fromUpdate.rows[0],
+            poolSize: allRoomIds.length,
+            toHostels: hostelNames,
+        });
+    } catch (err) {
+        await client.query('ROLLBACK');
+        return res.status(500).json({ success: false, message: err.message });
+    } finally {
+        client.release();
+    }
+});
+
+// ─── GET /api/admin/allocation-pool/:fromHostelId ─────────────────────────────
+// Returns the current pool config for a FROM hostel, grouped by TO hostel.
+
+router.get('/allocation-pool/:fromHostelId', async (req, res) => {
+    try {
+        const { fromHostelId } = req.params;
+        const result = await pool.query(
+            `SELECT
+                 arp.room_id,
+                 r.room_number,
+                 r.block,
+                 r.room_type,
+                 r.max_capacity,
+                 r.current_occupancy,
+                 r.hostel_id AS to_hostel_id,
+                 h.name     AS to_hostel_name
+             FROM allocation_room_pool arp
+             JOIN room   r ON r.id = arp.room_id
+             JOIN hostel h ON h.id = r.hostel_id
+             WHERE arp.source_hostel_id = $1
+             ORDER BY h.name, r.block NULLS FIRST, r.room_number ASC`,
+            [fromHostelId]
+        );
+
+        // Group by to_hostel_id
+        const grouped = {};
+        for (const row of result.rows) {
+            if (!grouped[row.to_hostel_id]) {
+                grouped[row.to_hostel_id] = {
+                    hostelId:   row.to_hostel_id,
+                    hostelName: row.to_hostel_name,
+                    rooms: [],
+                };
+            }
+            grouped[row.to_hostel_id].rooms.push({
+                id:          row.room_id,
+                roomNumber:  row.room_number,
+                block:       row.block,
+                roomType:    row.room_type,
+                maxCapacity: row.max_capacity,
+                occupancy:   row.current_occupancy,
+            });
+        }
+
+        return res.json({
+            success: true,
+            fromHostelId,
+            totalRooms: result.rowCount,
+            hostels: Object.values(grouped),
+        });
+    } catch (err) {
+        return res.status(500).json({ success: false, message: err.message });
+    }
+});
+
 // ─── POST /api/admin/set-allocation-date ─────────────────────────────────────
+// @deprecated  Use POST /set-allocation-pool instead.
+//
+// Kept for backward compatibility. Sets a single-hostel pool
+// (all rooms of toHostelId) and the allocation date.
 //
 // Body:
 //   fromHostelId   — the hostel whose STUDENTS will participate in this cycle
@@ -133,7 +370,7 @@ router.post('/set-allocation-date', async (req, res) => {
             return res.status(404).json({ success: false, message: 'To-hostel not found' });
         }
 
-        // Update the FROM hostel: set allocation schedule + target link
+        // Update the FROM hostel: set allocation schedule + target link (kept for display)
         const fromUpdate = await client.query(
             `UPDATE hostel
              SET allocation_date    = $1,
@@ -151,12 +388,33 @@ router.post('/set-allocation-date', async (req, res) => {
             [fromHostelId, toHostelId]
         );
 
+        // Also populate allocation_room_pool with ALL rooms of toHostelId
+        // so the new pool-aware engine works correctly even when using the legacy endpoint.
+        const toRoomsRes = await client.query(
+            `SELECT id FROM room WHERE hostel_id = $1`, [toHostelId]
+        );
+        if (toRoomsRes.rowCount > 0) {
+            await client.query(
+                `DELETE FROM allocation_room_pool WHERE source_hostel_id = $1`,
+                [fromHostelId]
+            );
+            const poolVals = toRoomsRes.rows.map((r, i) => `($1, $${i + 2})`).join(', ');
+            await client.query(
+                `INSERT INTO allocation_room_pool (source_hostel_id, room_id) VALUES ${poolVals}
+                 ON CONFLICT (source_hostel_id, room_id) DO NOTHING`,
+                [fromHostelId, ...toRoomsRes.rows.map(r => r.id)]
+            );
+        }
+
         await client.query('COMMIT');
 
         return res.json({
             success: true,
+            deprecated: true,
+            message: 'Use POST /set-allocation-pool for multi-hostel pool configuration.',
             fromHostel: fromUpdate.rows[0],
             toHostel: { id: toRes.rows[0].id, name: toRes.rows[0].name },
+            poolSize: toRoomsRes.rowCount,
         });
     } catch (err) {
         await client.query('ROLLBACK');
