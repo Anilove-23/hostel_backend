@@ -17,7 +17,7 @@ import importRoutes from "./imports/import.routes.js";
 
 import outpassRoutes from "./routes/outpass.routes.js";
 import studentRoutes from "./routes/student.routes.js";
-import complaintRoutes from '../working-routes/complaint.js';
+import complaintRoutes from "../working-routes/complaint.js";
 import authRoutes from "../working-routes/auth.js";
 import complaintRoutesWorking from "../working-routes/complaint.js";
 import outpassRoutesWorking from "../working-routes/outpass.js";
@@ -176,6 +176,5 @@ app.use((err, req, res, next) => {
             err.errors || []
     });
 });
-
 
 export default app;
