@@ -10,7 +10,10 @@
     "dev": "nodemon index.js",
     "seed": "node src/roomallocation/db/seed.js",
     "test:api": "node src/roomallocation/db/test-api.js",
-    "check:students": "node check_students.js"
+    "check:students": "node check_students.js",
+    "start": "node index.js",
+    "dev": "nodemon index.js",
+    "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --detectOpenHandles"
   },
   "dependencies": {
     "@faker-js/faker": "^10.4.0",
@@ -23,15 +26,30 @@
     "fast-csv": "^5.0.7",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.1.1",
-    "nodemon": "^3.1.14",
-    "pg": "^8.21.0",
+    "pg": "^8.22.0",
     "pusher": "^5.3.3",
     "pusher-js": "^8.4.0",
-    "redis": "^6.0.0",
+    "redis": "^6.1.0",
     "xlsx": "^0.18.5",
     "zod": "^4.4.3"
   },
   "devDependencies": {
-    "bcryptjs": "^3.0.3"
-  }
+    "bcryptjs": "^3.0.3",
+    "cross-env": "^10.1.0",
+    "jest": "^30.4.2",
+    "nodemon": "^3.1.14",
+    "supertest": "^7.2.2"
+  },
+  "directories": {
+    "test": "tests"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/workonlly/hostel_backend.git"
+  },
+  "keywords": [],
+  "bugs": {
+    "url": "https://github.com/workonlly/hostel_backend/issues"
+  },
+  "homepage": "https://github.com/workonlly/hostel_backend#readme"
 }
