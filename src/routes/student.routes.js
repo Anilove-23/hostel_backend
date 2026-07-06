@@ -7,7 +7,7 @@ import {
     sortStudentsInRange,
     getAllOutpassesByStatus,
     getHostelOutpassesByStatus,
-    assignAttendant
+    assignAttendent
 } from "../controllers/student.controller.js";
 import pool from "../db/pool.js";
 
@@ -78,8 +78,8 @@ router.post(
     sortStudentsInRange
 );
 router.post(
-    "/assign-attendant",
-    assignAttendant
+    "/assign-attendent",
+    assignAttendent
 );
 /*
 =================================================

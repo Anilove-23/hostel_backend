@@ -348,7 +348,7 @@ const bulkOutpassAction = asyncHandler(async (req, res) => {
             );
         }
 
-        /* ================= ATTENDANT HOSTEL ================= */
+        /* ================= ATTENDENT HOSTEL ================= */
 
         const hostelQuery = `
         SELECT hostel_id
@@ -645,7 +645,7 @@ const getPendingOutpasses = asyncHandler(async (req, res) => {
         (page - 1) * limit;
 
     /* =========================================
-       GET ATTENDANT HOSTEL
+       GET ATTENDENT HOSTEL
     ========================================= */
 
     const hostelQuery = `
@@ -667,7 +667,7 @@ const getPendingOutpasses = asyncHandler(async (req, res) => {
 
         throw new ApiError(
             404,
-            "Attendant not found"
+            "Attendent not found"
         );
     }
 

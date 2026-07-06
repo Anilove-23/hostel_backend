@@ -461,32 +461,32 @@ const getAllOutpassesByStatus = asyncHandler(async (req, res) => {
 
 /*
 =================================================
-ASSIGN ATTENDANT TO HOSTEL
+ASSIGN ATTENDENT TO HOSTEL
 =================================================
 */
-const assignAttendant = asyncHandler(async (req, res) => {
+const assignAttendent = asyncHandler(async (req, res) => {
 
     const {
-        attendant_id,
+        attendent_id,
         hostel_id
     } = req.body;
 
     if (
-        !attendant_id ||
+        !attendent_id ||
         !hostel_id
     ) {
 
         throw new ApiError(
             400,
-            "attendant_id and hostel_id are required"
+            "attendent_id and hostel_id are required"
         );
     }
 
-    const updatedAttendant =
+    const updatedAttendent =
         await pool.query(
 
             `
-            UPDATE attendant
+            UPDATE attendent
 
             SET hostel_id = $1
 
@@ -497,17 +497,17 @@ const assignAttendant = asyncHandler(async (req, res) => {
 
             [
                 hostel_id,
-                attendant_id
+                attendent_id
             ]
         );
 
     if (
-        updatedAttendant.rowCount === 0
+        updatedAttendent.rowCount === 0
     ) {
 
         throw new ApiError(
             404,
-            "Attendant not found"
+            "Attendent not found"
         );
     }
 
@@ -515,8 +515,8 @@ const assignAttendant = asyncHandler(async (req, res) => {
 
         new ApiResponse(
             200,
-            updatedAttendant.rows[0],
-            "Attendant assigned successfully"
+            updatedAttendent.rows[0],
+            "Attendent assigned successfully"
         )
     );
 });
@@ -566,11 +566,11 @@ const getHostelOutpassesByStatus = asyncHandler(async (req, res) => {
         );
     }
 
-    /* ================= ATTENDANT HOSTEL ================= */
+    /* ================= ATTENDENT HOSTEL ================= */
 
     const hostelQuery = `
         SELECT hostel_id
-        FROM attendant
+        FROM attendent
         WHERE id = $1
         LIMIT 1;
     `;
@@ -587,7 +587,7 @@ const getHostelOutpassesByStatus = asyncHandler(async (req, res) => {
 
         throw new ApiError(
             404,
-            "Attendant not found"
+            "Attendent not found"
         );
     }
 
@@ -721,5 +721,5 @@ export {
     sortStudentsInRange,
     getHostelOutpassesByStatus,
     getAllOutpassesByStatus,
-    assignAttendant 
+    assignAttendent 
 };
