@@ -107,7 +107,7 @@ API ROUTES
 
 // Auth Routes
 app.use(
-    "/auth",
+    "/api/auth",
     authRoutes
 );
 
