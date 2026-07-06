@@ -154,10 +154,20 @@ const createOutpass = asyncHandler(async (req, res) => {
 
     let departure = null;
 
+    const today = new Date()
     if (departure_datetime) {
+
+
 
         departure =
             new Date(departure_datetime);
+
+        if (isLocalOutpass) {
+            if (today.getDate() !== departure.getDate() || today.getMonth() !== departure.getMonth()
+                || today.getFullYear() !== departure.getFullYear()) {
+                throw new ApiError(400, "Departure must be on same day")
+            }
+        }
 
         // Allow 30 min tolerance
         if (
@@ -176,6 +186,10 @@ const createOutpass = asyncHandler(async (req, res) => {
 
         const arrival =
             new Date(arrival_datetime);
+
+        if (isLocalOutpass && (today.getDate() !== arrival.getDate() ||
+            today.getMonth() !== arrival.getMonth() || today.getFullYear() !== arrival.getFullYear()))
+            throw new ApiError(400, "Arrival must be on same day")
 
         if (
             departure &&
@@ -268,6 +282,10 @@ const getMyOutpasses = asyncHandler(async (req, res) => {
 
     const studentId = req.user?.id;
 
+    if(!studentId){
+        throw new ApiError(403,"Login with valid credentials")
+    }
+
     const query = `
         SELECT 
             o.*,
@@ -299,70 +317,69 @@ BULK OUTPASS ACTION
 =================================================
 */
 
-const bulkOutpassAction =
-asyncHandler(async (req, res) => {
+const bulkOutpassAction = asyncHandler(async (req, res) => {
 
-    const {
-        outpass_ids,
-        action
-    } = req.body;
+        const {
+            outpass_ids,
+            action
+        } = req.body;
 
-    /* ================= VALIDATION ================= */
+        /* ================= VALIDATION ================= */
 
-    if (
-        !Array.isArray(outpass_ids) ||
-        outpass_ids.length === 0
-    ) {
+        if (
+            !Array.isArray(outpass_ids) ||
+            outpass_ids.length === 0
+        ) {
 
-        throw new ApiError(
-            400,
-            "outpass_ids array required"
-        );
-    }
+            throw new ApiError(
+                400,
+                "outpass_ids array required"
+            );
+        }
 
-    if (
-        action !== "approve" &&
-        action !== "reject"
-    ) {
+        if (
+            action !== "approve" &&
+            action !== "reject"
+        ) {
 
-        throw new ApiError(
-            400,
-            "Invalid action"
-        );
-    }
+            throw new ApiError(
+                400,
+                "Invalid action"
+            );
+        }
 
-    /* ================= ATTENDANT HOSTEL ================= */
+        /* ================= ATTENDANT HOSTEL ================= */
 
-    const hostelQuery = `
+        const hostelQuery = `
         SELECT hostel_id
         FROM attendent
         WHERE id = $1
         LIMIT 1;
     `;
 
-    const hostelResult =
-        await pool.query(
-            hostelQuery,
-            [req.user.id]
-        );
+        const hostelResult =
+            await pool.query(
+                hostelQuery,
+                [req.user.id]
+            );
 
-    if (
-        hostelResult.rows.length === 0
-    ) {
+        if (
+            hostelResult.rows.length === 0
+        ) {
 
-        throw new ApiError(
-            404,
-            "Attendent not found"
-        );
-    }
+            throw new ApiError(
+                404,
+                "Attendent not found"
+            );
+        }
 
-    const hostelId =
-        hostelResult.rows[0]
-            .hostel_id;
+        const hostelId =
+            hostelResult.rows[0]
+                .hostel_id;
 
-    /* ================= VERIFY OUTPASSES ================= */
+        /* ================= VERIFY OUTPASSES ================= */
 
-    const verifyQuery = `
+        const verifyQuery = `
         SELECT
             o.id
 
@@ -378,48 +395,48 @@ asyncHandler(async (req, res) => {
             AND o.is_active = true;
     `;
 
-    const verifyResult =
-        await pool.query(
-            verifyQuery,
-            [
-                outpass_ids,
-                hostelId
-            ]
-        );
+        const verifyResult =
+            await pool.query(
+                verifyQuery,
+                [
+                    outpass_ids,
+                    hostelId
+                ]
+            );
 
-    const validIds =
-        verifyResult.rows.map(
-            (row) => row.id
-        );
+        const validIds =
+            verifyResult.rows.map(
+                (row) => row.id
+            );
 
-    if (validIds.length === 0) {
+        if (validIds.length === 0) {
 
-        throw new ApiError(
-            400,
-            "No valid pending outpasses found"
-        );
-    }
+            throw new ApiError(
+                400,
+                "No valid pending outpasses found"
+            );
+        }
 
-    /* ================= ACTION CONFIG ================= */
+        /* ================= ACTION CONFIG ================= */
 
-    let status =
-        "Approved";
+        let status =
+            "Approved";
 
-    let active =
-        true;
+        let active =
+            true;
 
-    if (action === "reject") {
+        if (action === "reject") {
 
-        status =
-            "Rejected";
+            status =
+                "Rejected";
 
-        active =
-            false;
-    }
+            active =
+                false;
+        }
 
-    /* ================= UPDATE ================= */
+        /* ================= UPDATE ================= */
 
-    const updateQuery = `
+        const updateQuery = `
         UPDATE outpass
 
         SET
@@ -440,37 +457,37 @@ asyncHandler(async (req, res) => {
         RETURNING *;
     `;
 
-    const updateResult =
-        await pool.query(
-            updateQuery,
-            [
-                status,
-                active,
-                req.user.id,
-                validIds
-            ]
+        const updateResult =
+            await pool.query(
+                updateQuery,
+                [
+                    status,
+                    active,
+                    req.user.id,
+                    validIds
+                ]
+            );
+
+        /* ================= RESPONSE ================= */
+
+        return res.status(200).json(
+
+            new ApiResponse(
+                200,
+                {
+                    action,
+
+                    affected_count:
+                        updateResult.rows.length,
+
+                    outpasses:
+                        updateResult.rows,
+                },
+
+                `Bulk ${action} successful`
+            )
         );
-
-    /* ================= RESPONSE ================= */
-
-    return res.status(200).json(
-
-        new ApiResponse(
-            200,
-            {
-                action,
-
-                affected_count:
-                    updateResult.rows.length,
-
-                outpasses:
-                    updateResult.rows,
-            },
-
-            `Bulk ${action} successful`
-        )
-    );
-});
+    });
 /*
 =================================================
 GET ACTIVE OUTPASS
@@ -481,12 +498,14 @@ const getActiveOutpass = asyncHandler(async (req, res) => {
 
     const studentId = req.user?.id;
 
+    if(!studentId) throw new ApiError(400,"Login with valid Id")
+
     const query = `
         SELECT *
         FROM outpass
         WHERE student_id = $1
         AND is_active = true
-        LIMIT 2;
+        LIMIT 1;
     `;
 
     const result = await pool.query(
@@ -583,13 +602,6 @@ const cancelOutpass = asyncHandler(async (req, res) => {
             "Cannot cancel after exiting campus"
         );
     }
-
-    // if (outpass.outp_status === "Approved" ) {
-    //     throw new ApiError(
-    //         400,
-    //         "Approved outpass cannot be cancelled"
-    //     );
-    // }
 
     const updateQuery = `
         UPDATE outpass
@@ -782,6 +794,11 @@ APPROVE OUTPASS
 const approveOutpass = asyncHandler(async (req, res) => {
 
     const { id } = req.params;
+    const attendentId = req.user?.id 
+
+    if(!id || !attendentId){
+        throw new ApiError(400,"Outpass Id or Admin Id is missing")
+    }
 
     const hostelQuery = `
     SELECT hostel_id
@@ -792,7 +809,7 @@ const approveOutpass = asyncHandler(async (req, res) => {
 
     const hostelResult = await pool.query(
         hostelQuery,
-        [req.user.id]
+        [attendentId]
     );
 
     if (hostelResult.rows.length === 0) {
@@ -847,7 +864,7 @@ const approveOutpass = asyncHandler(async (req, res) => {
 
     const result = await pool.query(
         query,
-        [req.user.id, id]
+        [attendentId, id]
     );
 
     return res.status(200).json(
@@ -1210,11 +1227,7 @@ const recordEntry = asyncHandler(async (req, res) => {
     }
 });
 
-/*
-=================================================
-MONITOR DASHBOARD
-=================================================
-*/
+
 /*
 =================================================
 MONITOR DASHBOARD
@@ -1222,7 +1235,16 @@ MONITOR DASHBOARD
 */
 const monitorDashboard = asyncHandler(async (req, res) => {
 
-    const query = `
+    const page =
+        parseInt(req.query.page) || 1;
+
+    const limit =
+        parseInt(req.query.limit) || 10;
+
+    const offset =
+        (page - 1) * limit;
+
+    const dataQuery = `
         SELECT
             o.*,
 
@@ -1232,7 +1254,9 @@ const monitorDashboard = asyncHandler(async (req, res) => {
             s.department,
             s.email,
             s.phone,
+
             r.room_number AS room,
+
             s.hostel,
             s.hostel_id
 
@@ -1240,23 +1264,67 @@ const monitorDashboard = asyncHandler(async (req, res) => {
 
         JOIN student s
         ON o.student_id = s.id
-        
+
         LEFT JOIN room r
         ON s.physical_room_id = r.id
 
-        ORDER BY o.created_at DESC;
+        ORDER BY o.created_at DESC
+
+        LIMIT $1 OFFSET $2;
     `;
 
-    const result = await pool.query(
-        query
-    );
-    console.log(result.rows)
+    const countQuery = `
+        SELECT COUNT(*) AS total
+        FROM outpass;
+    `;
+
+    const [
+        result,
+        countResult
+    ] = await Promise.all([
+        pool.query(
+            dataQuery,
+            [limit, offset]
+        ),
+        pool.query(
+            countQuery
+        )
+    ]);
+
+    const total =
+        parseInt(
+            countResult.rows[0].total
+        );
 
     return res.status(200).json(
 
         new ApiResponse(
             200,
-            result.rows,
+            {
+                outpasses:
+                    result.rows,
+
+                pagination: {
+                    page,
+                    limit,
+                    total,
+
+                    totalPages:
+                        Math.ceil(
+                            total / limit
+                        ),
+
+                    hasNextPage:
+                        page <
+                        Math.ceil(
+                            total / limit
+                        ),
+
+                    hasPrevPage:
+                        page > 1
+                }
+            },
+
             "Monitoring dashboard data fetched successfully"
         )
     );
