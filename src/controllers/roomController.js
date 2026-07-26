@@ -116,13 +116,35 @@ export const deleteRoom = async (req, res) => {
 export const assignResident = async (req, res) => {
   try {
     const { hostelId, roomId } = req.params;
-    const { studentId } = req.body; 
+    const { studentId } = req.body;
+
+    // assign_student_to_room() only clears the student's own UPCOMING
+    // assignments before inserting a new one — it does not check ACTIVE
+    // assignments elsewhere, so without this check a student could end up
+    // resident in two rooms at once. Check first and surface a clear error.
+    const existing = await pool.query(
+      `SELECT h.name as hostel_name, r.room_number
+       FROM room_assignment ra
+       JOIN room r ON r.id = ra.room_id
+       JOIN hostel h ON h.id = r.hostel_id
+       WHERE ra.student_id = $1 AND ra.assignment_status IN ('ACTIVE', 'UPCOMING')
+       LIMIT 1`,
+      [studentId]
+    );
+
+    if (existing.rows.length > 0) {
+      const { hostel_name, room_number } = existing.rows[0];
+      return res.status(409).json({
+        error: `Student is already allocated to Room ${room_number} in ${hostel_name}`,
+        currentAllocation: { hostelName: hostel_name, roomNumber: room_number },
+      });
+    }
 
     const query = `SELECT assign_student_to_room($1, $2, 'ADMIN');`;
     await pool.query(query, [studentId, roomId]);
-    
+
     if (hostelId) await redisClient.del(`hostel:${hostelId}:rooms`);
-    
+
     res.status(200).json({ message: 'Student successfully assigned to room' });
   } catch (error) {
     console.error("Error assigning student:", error);

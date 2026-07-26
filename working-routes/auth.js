@@ -107,12 +107,17 @@ router.post('/login', async (req, res) => {
             });
         }
 
+        // For warden-table logins, carry authority_level + hostel in the token so
+        // downstream RBAC middleware can scope permissions without an extra DB
+        // lookup per request. Additive only — no existing code reads these fields.
+        const tokenPayload = { id: user.id, email: user.email, role };
+        if (role === 'warden') {
+            tokenPayload.authority_level = user.authority_level ?? null;
+            tokenPayload.hostel = user.hostel ?? null;
+        }
+
         const token = jwt.sign(
-            {
-                id: user.id,
-                email: user.email,
-                role
-            },
+            tokenPayload,
             process.env.JWT_SECRET,
             {
                 expiresIn: '1h'

@@ -19,9 +19,14 @@ const pool = process.env.DATABASE_URL
           port:     process.env.DB_PORT,
       });
 
+pool.on("error", (err) => {
+    console.error("Unexpected error on idle PostgreSQL client:", err);
+});
+
 pool.connect()
-    .then(() => {
+    .then((client) => {
         console.log("PostgreSQL connected successfully");
+        client.release();
     })
     .catch((err) => {
         console.error("Database connection error:", err);
