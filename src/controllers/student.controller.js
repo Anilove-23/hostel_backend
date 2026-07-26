@@ -56,28 +56,37 @@ const searchByNameOrRollno = asyncHandler(async (req, res) => {
     const whereClause =
         conditions.join(" OR ");
 
-    const dataQuery = `
-        SELECT
-            id,
-            name,
-            roll_no,
-            email,
-            phone,
-            department,
-            hostel,
-            hostel_id,
-            physical_room_id,
-            created_at
+    const dataQuery = 
+        `
+    SELECT
+        s.id,
+        s.name,
+        s.roll_no,
+        s.email,
+        s.phone,
+        s.department,
+        s.hostel,
+        s.hostel_id,
+        r.room_number AS room,
+        s.created_at
 
-        FROM student
+    FROM student s
 
-        WHERE ${whereClause}
+    LEFT JOIN room_assignment ra
+        ON s.id = ra.student_id
+       AND ra.assignment_status = 'ACTIVE'
 
-        ORDER BY created_at DESC
+    LEFT JOIN room r
+        ON ra.room_id = r.id
 
-        LIMIT $${values.length + 1}
-        OFFSET $${values.length + 2};
-    `;
+    WHERE ${whereClause}
+
+    ORDER BY s.created_at DESC
+
+    LIMIT $${values.length + 1}
+    OFFSET $${values.length + 2};
+`;
+    ;
 
     const countQuery = `
         SELECT COUNT(*) AS total
@@ -213,8 +222,12 @@ const sortStudentsInRange = asyncHandler(async (req, res) => {
         JOIN outpass o
         ON o.student_id = s.id
 
-        LEFT JOIN room r
-        ON s.physical_room_id = r.id
+        LEFT JOIN room_assignment ra
+    ON s.id = ra.student_id
+   AND ra.assignment_status = 'ACTIVE'
+
+LEFT JOIN room r
+    ON ra.room_id = r.id
 
         WHERE
             o.departure_datetime <= $2
@@ -376,8 +389,12 @@ const getAllOutpassesByStatus = asyncHandler(async (req, res) => {
         JOIN student s
         ON o.student_id = s.id
 
-        LEFT JOIN room r
-        ON s.physical_room_id = r.id
+        LEFT JOIN room_assignment ra
+    ON s.id = ra.student_id
+   AND ra.assignment_status = 'ACTIVE'
+
+LEFT JOIN room r
+    ON ra.room_id = r.id
 
         WHERE
             o.outp_status = $1
@@ -625,8 +642,12 @@ const getHostelOutpassesByStatus = asyncHandler(async (req, res) => {
         JOIN student s
         ON o.student_id = s.id
 
-        LEFT JOIN room r
-        ON s.physical_room_id = r.id
+        LEFT JOIN room_assignment ra
+    ON s.id = ra.student_id
+   AND ra.assignment_status = 'ACTIVE'
+
+LEFT JOIN room r
+    ON ra.room_id = r.id
 
         WHERE
             o.outp_status = $1
@@ -721,5 +742,5 @@ export {
     sortStudentsInRange,
     getHostelOutpassesByStatus,
     getAllOutpassesByStatus,
-    assignAttendent 
+    assignAttendent
 };
