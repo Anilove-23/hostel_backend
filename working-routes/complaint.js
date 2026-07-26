@@ -1,6 +1,6 @@
 import express from 'express';
 
-import pool from '../src/db/db.js';
+import pool from '../src/db/pool.js';
 
 import auth from '../src/middleware/middleware.js';
 
