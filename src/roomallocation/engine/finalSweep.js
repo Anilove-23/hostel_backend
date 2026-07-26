@@ -30,38 +30,36 @@ import pool from '../../db/pool.js';
 // ─────────────────────────────────────────────────────────
 
 /**
- * Run the final allocation sweep for a hostel.
+ * Run the final allocation sweep for an allocation event.
  * Called by evaluationScheduler after all batches complete.
  *
- * @param {string} hostelId  UUID
+ * @param {string} eventId  UUID of allocation_event
  * @returns {Promise<{ assigned: number, skipped: number, unplaced: number }>}
  */
-export async function execute(hostelId) {
-    // 1. Fetch all unallocated students associated with this hostel
-    // (students whose allocated_room_id is null and is_allotted = false)
+export async function execute(eventId) {
+    // 1. Fetch all unallocated students whose group is part of this event
     const studentsRes = await pool.query(
         `SELECT s.id, s.name, s.roll_no, s.individual_rank
          FROM student s
+         JOIN housing_group hg ON hg.id = s.group_id
          WHERE s.is_allotted = false
-           AND EXISTS (
-               SELECT 1 FROM housing_group hg
-               JOIN batch b ON hg.batch_id = b.id
-               WHERE hg.id = s.group_id
-                 AND b.hostel_id = $1
-           )
+           AND hg.allocation_event_id = $1
          ORDER BY s.individual_rank ASC NULLS LAST, s.id ASC`,
-        [hostelId]
+        [eventId]
     );
 
-    // Also include students with no group who were part of this hostel
-    // (shattered / penalized members)
+    // Also include orphan students (shattered / penalized, group dissolved)
+    // whose current_year matches the event's target_year
     const orphanRes = await pool.query(
         `SELECT s.id, s.name, s.roll_no, s.individual_rank
          FROM student s
+         JOIN allocation_event ae ON ae.target_year = s.current_year
          WHERE s.is_allotted = false
            AND s.group_id IS NULL
            AND s.physical_room_id IS NULL
-         ORDER BY s.individual_rank ASC NULLS LAST, s.id ASC`
+           AND ae.id = $1
+         ORDER BY s.individual_rank ASC NULLS LAST, s.id ASC`,
+        [eventId]
     );
 
     // Merge, deduplicate by id
@@ -76,7 +74,7 @@ export async function execute(hostelId) {
     let unplaced = 0;
 
     for (const student of allStudents) {
-        const outcome = await _assignStudentToRoom(student, hostelId);
+        const outcome = await _assignStudentToRoom(student, eventId);
 
         if (outcome === 'ASSIGNED') assigned++;
         else if (outcome === 'SKIPPED') skipped++;
@@ -96,7 +94,7 @@ export async function execute(hostelId) {
  *
  * @returns {'ASSIGNED'|'SKIPPED'|'UNPLACED'}
  */
-async function _assignStudentToRoom(student, hostelId) {
+async function _assignStudentToRoom(student, eventId) {
     // Idempotency: re-check if already assigned
     const freshCheck = await pool.query(
         `SELECT is_allotted FROM student WHERE id = $1`,
@@ -106,18 +104,19 @@ async function _assignStudentToRoom(student, hostelId) {
         return 'SKIPPED';
     }
 
-    // Fetch available rooms, sorted tightest-first to minimise waste
+    // Fetch available rooms from the event pool (tightest-first)
     const roomsRes = await pool.query(
-        `SELECT id, max_capacity, current_occupancy
-         FROM room
-         WHERE hostel_id = $1
-           AND current_occupancy < max_capacity
-         ORDER BY (max_capacity - current_occupancy) ASC, id ASC`,
-        [hostelId]
+        `SELECT r.id, r.max_capacity, r.current_occupancy
+         FROM room r
+         JOIN event_room_pool erp ON erp.room_id = r.id
+         WHERE erp.allocation_event_id = $1
+           AND r.current_occupancy < r.max_capacity
+         ORDER BY (r.max_capacity - r.current_occupancy) ASC, r.id ASC`,
+        [eventId]
     );
 
     if (roomsRes.rowCount === 0) {
-        await logFinalSweepSkipped({ hostelId, studentId: student.id, reason: 'No available rooms' });
+        await logFinalSweepSkipped({ eventId, studentId: student.id, reason: 'No available rooms' });
         return 'UNPLACED';
     }
 

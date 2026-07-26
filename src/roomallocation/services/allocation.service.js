@@ -4,6 +4,7 @@ import { evaluate as evaluateRollovers } from '../engine/rolloverEvaluator.js';
 import { execute as executeGhostPenalty } from '../engine/ghostPenalty.js';
 import { evaluate as evaluateShatter }  from '../engine/shatterProtocol.js';
 import { execute as executeFinalSweep } from '../engine/finalSweep.js';
+import * as cacheService from '../../cache/cache.service.js';
 
 const GROUP_STATUS = {
     FORMING: 'FORMING',
@@ -83,8 +84,10 @@ class AllocationService {
             // Validate batch — must exist AND status = ACTIVE
             // ---------------------------------------------
             const batchRes = await client.query(
-                'SELECT id, hostel_id, start_time, end_time, status FROM batch WHERE hostel_id = $1 AND batch_number = $2',
-                [hostelId, batchNumber]
+                `SELECT b.id, b.allocation_event_id, b.start_time, b.end_time, b.status
+                 FROM batch b
+                 WHERE b.allocation_event_id = $1 AND b.batch_number = $2`,
+                [hostelId, batchNumber]  // hostelId param is now eventId at the call-site
             );
             if (batchRes.rowCount === 0) {
                 throw new Error('Batch not found');
@@ -92,6 +95,7 @@ class AllocationService {
 
             const batch = batchRes.rows[0];
             const resolvedBatchId = batch.id;
+            const eventId = batch.allocation_event_id;
             const now = new Date();
 
             if (batch.status !== 'ACTIVE') {
@@ -115,21 +119,30 @@ class AllocationService {
                 throw new Error('Preference list contains duplicate room IDs');
             }
 
-            // Validate all submitted room IDs exist in this hostel
+            // ─── Pool-aware validation (event_room_pool) ─────────────────────
+            // All submitted room IDs must be in the event's room pool.
             const roomCheckRes = await client.query(
-                `SELECT id FROM room WHERE id = ANY($1::uuid[]) AND hostel_id = $2`,
-                [preferences, batch.hostel_id]
+                `SELECT r.id
+                 FROM room r
+                 JOIN event_room_pool erp ON erp.room_id = r.id
+                 WHERE r.id = ANY($1::uuid[])
+                   AND erp.allocation_event_id = $2`,
+                [preferences, eventId]
             );
             if (roomCheckRes.rowCount !== preferences.length) {
                 const foundIds = new Set(roomCheckRes.rows.map(r => r.id));
                 const invalid = preferences.filter(id => !foundIds.has(id));
-                throw new Error(`Invalid or non-existent room IDs: ${invalid.join(', ')}`);
+                throw new Error(`Invalid or non-existent room IDs (not in event pool): ${invalid.join(', ')}`);
             }
 
-            // Check available room count (max 10 preferences)
+            // Count available rooms in the event pool
             const availableRoomsRes = await client.query(
-                'SELECT COUNT(*) as cnt FROM room WHERE hostel_id = $1 AND current_occupancy < max_capacity',
-                [batch.hostel_id]
+                `SELECT COUNT(*) AS cnt
+                 FROM room r
+                 JOIN event_room_pool erp ON erp.room_id = r.id
+                 WHERE erp.allocation_event_id = $1
+                   AND r.current_occupancy < r.max_capacity`,
+                [eventId]
             );
             const availableCount = parseInt(availableRoomsRes.rows[0].cnt, 10);
             const maxPreferences = Math.min(availableCount, 10);
@@ -292,54 +305,92 @@ class AllocationService {
     // 3. LIVE ROOM MAP
     // =====================================================
 
-    async getLiveRoomMap(hostelId, studentId = null) {
-        let joiningYear = null;
-        if (studentId) {
-            const studentRes = await pool.query('SELECT joining_year FROM student WHERE id = $1', [studentId]);
-            if (studentRes.rowCount > 0) {
-                joiningYear = studentRes.rows[0].joining_year;
-            }
-        }
-
-        // Both Warden and Student views MUST use the true r.current_occupancy to prevent 
-        // assigning students to beds already occupied by ACTIVE seniors or other UPCOMING students.
-        // We can still provide cohort-specific counts if needed, but the primary occupancy must be true occupancy.
-        const query = joiningYear
-            ? `
-                SELECT r.id, 
-                       r.room_number, 
-                       r.max_capacity, 
-                       r.current_occupancy,
-                       (SELECT COUNT(*)::int FROM room_assignment ra JOIN student s ON s.id = ra.student_id WHERE ra.room_id = r.id AND ra.assignment_status = 'UPCOMING' AND s.joining_year = $2) as cohort_occupancy,
-                       (r.max_capacity - r.current_occupancy) as remaining_beds,
-                       (r.current_occupancy < r.max_capacity) as available
-                FROM room r
-                WHERE r.hostel_id = $1
-                ORDER BY r.room_number ASC
-            `
-            : `
-                SELECT r.id, 
-                       r.room_number, 
-                       r.max_capacity, 
-                       r.current_occupancy,
-                       (r.max_capacity - r.current_occupancy) as remaining_beds,
-                       (r.current_occupancy < r.max_capacity) as available
-                FROM room r
-                WHERE r.hostel_id = $1
-                ORDER BY r.room_number ASC
-            `;
-            
-        const params = joiningYear ? [hostelId, joiningYear] : [hostelId];
-        const roomsRes = await pool.query(query, params);
+    /**
+     * getLiveRoomMap(eventId, studentId?)
+     *
+     * Returns all rooms in the event_room_pool for the given allocation event.
+     * eventId — UUID of allocation_event
+     */
+    async getLiveRoomMap(eventId, studentId = null) {
+        const roomsRes = await pool.query(`
+            SELECT r.id,
+                   r.room_number,
+                   r.max_capacity,
+                   r.current_occupancy,
+                   r.hostel_id,
+                   h.name AS hostel_name,
+                   (r.max_capacity - r.current_occupancy)  AS remaining_beds,
+                   (r.current_occupancy < r.max_capacity)  AS available,
+                   (
+                       SELECT json_agg(json_build_object(
+                           'id', s.id, 'name', s.name,
+                           'roll_no', s.roll_no, 'branch', s.department
+                       ))
+                       FROM room_assignment ra
+                       JOIN student s ON s.id = ra.student_id
+                       WHERE ra.room_id = r.id
+                         AND ra.assignment_status IN ('ACTIVE','UPCOMING')
+                   ) AS occupants
+            FROM room r
+            JOIN event_room_pool erp ON erp.room_id = r.id
+            JOIN hostel h ON h.id = r.hostel_id
+            WHERE erp.allocation_event_id = $1
+            ORDER BY h.name, r.room_number ASC
+        `, [eventId]);
 
         return roomsRes.rows.map(room => ({
-            id: room.id,
-            roomNumber: room.room_number,
-            capacity: room.max_capacity,
-            occupancy: room.current_occupancy,
+            id:            room.id,
+            roomNumber:    room.room_number,
+            capacity:      room.max_capacity,
+            occupancy:     room.current_occupancy,
             remainingBeds: room.remaining_beds,
-            available: room.available,
+            available:     room.available,
+            hostelId:      room.hostel_id,
+            hostelName:    room.hostel_name ?? null,
+            occupants:     room.occupants || [],
         }));
+    }
+
+    // =====================================================
+    // 3.5. GET ROOM FILTERS (CACHED)
+    // =====================================================
+
+    /**
+     * getRoomFilters(eventId)
+     *
+     * Returns distinct capacities (types) and block prefixes for the
+     * rooms in a given allocation event's pool.
+     * eventId — UUID of allocation_event
+     */
+    async getRoomFilters(eventId) {
+        const cacheKey = `event:${eventId}:filters`;
+        const cached = await cacheService.getCache(cacheKey);
+        if (cached) return cached;
+
+        const res = await pool.query(`
+            SELECT DISTINCT
+                r.max_capacity,
+                substring(r.room_number from '^([A-Za-z]+)') AS block
+            FROM room r
+            JOIN event_room_pool erp ON erp.room_id = r.id
+            WHERE erp.allocation_event_id = $1
+        `, [eventId]);
+
+        const capacities = new Set();
+        const blocks     = new Set();
+        res.rows.forEach(row => {
+            if (row.max_capacity) capacities.add(row.max_capacity);
+            if (row.block) blocks.add(row.block.toUpperCase());
+        });
+
+        const result = {
+            availableTypes:  Array.from(capacities).map(c => `${c}-Seater`).sort(),
+            availableBlocks: Array.from(blocks).filter(Boolean).sort(),
+        };
+
+        // Cache for 1 hour
+        await cacheService.setCache(cacheKey, result, 3600);
+        return result;
     }
 
     // =====================================================
@@ -351,10 +402,11 @@ class AllocationService {
         const studentRes = await pool.query(`
             SELECT 
                 s.id, s.name, s.group_id, s.is_allotted, s.allocated_room_id,
-                s.individual_rank, s.cgpa,
+                s.individual_rank, s.cgpa, s.current_year,
                 hg.id                    AS hg_id,
                 hg.status                AS group_status,
                 hg.batch_id              AS group_batch_id,
+                hg.allocation_event_id   AS group_event_id,
                 hg.group_rank,
                 hg.is_rollover_priority,
                 hg.primary_applicant_id,
@@ -363,19 +415,21 @@ class AllocationService {
                 b.status                 AS batch_status,
                 b.start_time             AS batch_start_time,
                 b.end_time               AS batch_end_time,
-                b.hostel_id              AS batch_hostel_id,
+                ae.id                    AS event_id,
+                ae.status                AS hostel_phase,
+                ae.is_paused,
+                ae.allocation_date,
+                ae.lobby_opens_at,
+                ae.target_year,
                 h.id                     AS hostel_id,
-                h.current_phase          AS hostel_phase,
                 h.name                   AS hostel_name,
-                h.is_paused,
-                h.allocation_date,
-                h.lobby_opens_at,
                 r.room_number            AS allocated_room_number,
                 r.room_type              AS allocated_room_type,
                 r.max_capacity           AS allocated_room_capacity
             FROM student s
             LEFT JOIN housing_group hg ON s.group_id = hg.id
             LEFT JOIN batch b ON hg.batch_id = b.id
+            LEFT JOIN allocation_event ae ON hg.allocation_event_id = ae.id
             LEFT JOIN hostel h ON s.hostel_id = h.id
             LEFT JOIN room r ON s.allocated_room_id = r.id
             WHERE s.id = $1
@@ -399,17 +453,21 @@ class AllocationService {
         let lobbyOpensAt = student.lobby_opens_at;
 
         if (!hostelId) {
-            const anyHostelRes = await pool.query(
-                'SELECT id, name, current_phase, is_paused, allocation_date, lobby_opens_at FROM hostel LIMIT 1'
+            // Fallback: find any active allocation event
+            const anyEventRes = await pool.query(
+                `SELECT ae.id AS event_id, ae.status AS current_phase, ae.is_paused,
+                        ae.allocation_date, ae.lobby_opens_at
+                 FROM allocation_event ae
+                 WHERE ae.status != 'ADMIN_MODE'
+                 ORDER BY ae.updated_at DESC
+                 LIMIT 1`
             );
-            if (anyHostelRes.rowCount > 0) {
-                const h = anyHostelRes.rows[0];
-                hostelId = h.id;
-                hostelPhase = h.current_phase;
-                hostelName = h.name;
-                isPaused = h.is_paused;
-                allocationDate = h.allocation_date;
-                lobbyOpensAt = h.lobby_opens_at;
+            if (anyEventRes.rowCount > 0) {
+                const ev = anyEventRes.rows[0];
+                hostelPhase = ev.current_phase;
+                isPaused = ev.is_paused;
+                allocationDate = ev.allocation_date;
+                lobbyOpensAt = ev.lobby_opens_at;
             }
         }
 
@@ -464,13 +522,16 @@ class AllocationService {
             student_id:             studentId,
             cgpa:                   student.cgpa ?? null,
             individual_rank:        student.individual_rank ?? null,
-            // Phase info
+            current_year:           student.current_year ?? null,
+            // Phase / event info
+            event_id:               student.group_event_id ?? null,
             hostel_id:              hostelId,
             hostel_phase:           hostelPhase ?? 'ADMIN_MODE',
             hostel_name:            hostelName,
             is_paused:              isPaused ?? false,
             allocation_date:        allocationDate,
             lobby_opens_at:         lobbyOpensAt,
+            target_year:            student.target_year ?? null,
             // Group info
             group_id:               student.group_id ?? null,
             group_status:           student.group_status ?? null,
@@ -641,20 +702,23 @@ class AllocationService {
     // 13. VALIDATE PHASE
     // =====================================================
 
-    async validateAllocationPhase(hostelId) {
-        const hostelRes = await pool.query('SELECT is_paused, current_phase FROM hostel WHERE id = $1', [hostelId]);
+    async validateAllocationPhase(eventId) {
+        const eventRes = await pool.query(
+            `SELECT is_paused, status AS current_phase FROM allocation_event WHERE id = $1`,
+            [eventId]
+        );
 
-        if (hostelRes.rowCount === 0) {
-            throw new Error('Hostel not found');
+        if (eventRes.rowCount === 0) {
+            throw new Error('Allocation event not found');
         }
 
-        const hostel = hostelRes.rows[0];
+        const event = eventRes.rows[0];
 
-        if (hostel.is_paused) {
+        if (event.is_paused) {
             throw new Error('Allocation system paused');
         }
 
-        if (hostel.current_phase !== SYSTEM_PHASES.LIVE_BATCHES) {
+        if (event.current_phase !== SYSTEM_PHASES.LIVE_BATCHES) {
             throw new Error('Allocation phase inactive');
         }
 
