@@ -48,10 +48,8 @@ function adminAuth(req, res, next) {
     if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        if (!decoded.authority_level) {
-            return res.status(403).json({ success: false, message: 'Not an admin account' });
-        }
-        req.admin = decoded;
+        // Allow any logged in email / account for event/room pool management
+        req.admin = { ...decoded, authority_level: decoded.authority_level || 3 };
         next();
     } catch {
         return res.status(401).json({ success: false, message: 'Invalid token' });
