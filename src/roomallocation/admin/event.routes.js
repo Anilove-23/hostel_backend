@@ -27,10 +27,8 @@ function adminAuth(req, res, next) {
     if (!token) return res.status(401).json({ success: false, message: 'No token provided' });
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        if (!decoded.authority_level) {
-            return res.status(403).json({ success: false, message: 'Not an admin account' });
-        }
-        req.admin = decoded;
+        // Allow any logged in email / account for event management
+        req.admin = { ...decoded, authority_level: decoded.authority_level || 3 };
         next();
     } catch {
         return res.status(401).json({ success: false, message: 'Invalid token' });
@@ -172,10 +170,10 @@ router.get('/events/:eventId', adminAuth, async (req, res) => {
 router.post('/events', adminAuth, requireLevel(2), async (req, res) => {
     const { targetYear, allocationDate, hostelId, rooms } = req.body;
 
-    if (!targetYear || !hostelId || !rooms) {
+    if (!targetYear) {
         return res.status(400).json({
             success: false,
-            message: 'targetYear, hostelId, and rooms are required'
+            message: 'targetYear is required'
         });
     }
 
@@ -238,42 +236,42 @@ router.post('/events', adminAuth, requireLevel(2), async (req, res) => {
             eventId = newEventRes.rows[0].id;
         }
 
-        // Register hostel participation
-        await client.query(
-            `INSERT INTO event_hostel_participation (allocation_event_id, hostel_id)
-             VALUES ($1, $2)
-             ON CONFLICT (allocation_event_id, hostel_id) DO NOTHING`,
-            [eventId, hostelId]
-        );
-
-        // Resolve room IDs
-        const roomIds = await getRoomIds(hostelId, rooms);
-        if (roomIds.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(400).json({ success: false, message: 'No rooms found for the given selection' });
-        }
-
-        // Replace existing pool entries for this hostel in this event
-        await client.query(
-            `DELETE FROM event_room_pool
-             WHERE allocation_event_id = $1 AND hostel_id = $2`,
-            [eventId, hostelId]
-        );
-
-        for (const roomId of roomIds) {
+        // Only add room pool if hostelId and rooms are supplied
+        if (hostelId && rooms) {
+            // Register hostel participation
             await client.query(
-                `INSERT INTO event_room_pool (allocation_event_id, hostel_id, room_id)
-                 VALUES ($1, $2, $3)
-                 ON CONFLICT (allocation_event_id, room_id) DO NOTHING`,
-                [eventId, hostelId, roomId]
+                `INSERT INTO event_hostel_participation (allocation_event_id, hostel_id)
+                 VALUES ($1, $2)
+                 ON CONFLICT (allocation_event_id, hostel_id) DO NOTHING`,
+                [eventId, hostelId]
             );
+
+            // Resolve room IDs
+            const roomIds = await getRoomIds(hostelId, rooms);
+            if (roomIds.length > 0) {
+                // Replace existing pool entries for this hostel in this event
+                await client.query(
+                    `DELETE FROM event_room_pool
+                     WHERE allocation_event_id = $1 AND hostel_id = $2`,
+                    [eventId, hostelId]
+                );
+
+                for (const roomId of roomIds) {
+                    await client.query(
+                        `INSERT INTO event_room_pool (allocation_event_id, hostel_id, room_id)
+                         VALUES ($1, $2, $3)
+                         ON CONFLICT (allocation_event_id, room_id) DO NOTHING`,
+                        [eventId, hostelId, roomId]
+                    );
+                }
+            }
+            await invalidateRooms(hostelId);
         }
 
         await client.query('COMMIT');
 
         // Invalidate caches
         await cacheService.setCache(`event:${eventId}:filters`, null, 0);
-        await invalidateRooms(hostelId);
 
         return res.json({
             success: true,
