@@ -163,7 +163,7 @@ class AllocationService {
                 'SELECT individual_rank FROM student WHERE id = $1',
                 [group.primary_applicant_id]
             );
-            const effectiveLeaderRank = leaderRes.rows[0]?.individual_rank;
+            const effectiveLeaderRank = leaderRes.rows[0]?.individual_rank ?? 999999;
 
             // ---------------------------------------------
             // Create submission
