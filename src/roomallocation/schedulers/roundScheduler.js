@@ -6,9 +6,9 @@
  * Owns:
  *   - Freezing submission windows at minute 10/20/30...
  *   - Calling allocationService.executeBatchRound()
- *   - Advancing the round counter (1 → 2 → ... → 6)
+ *   - Advancing the round counter (1 → 2 → ... → MAX_ROUNDS)
  *   - Broadcasting updated room maps after allocation
- *   - Detecting end of round cycle (after Round 6)
+ *   - Detecting end of round cycle (after Round MAX_ROUNDS)
  *   - Crash recovery: re-derives current round from DB
  *
  * Does NOT:
@@ -16,13 +16,12 @@
  *   - Run rollover/penalty logic  → evaluationScheduler
  *   - Contain allocation math     → engine/roundallocator.js
  *
- * Round timing (per batch window):
+ * Round timing (per batch window, MAX_ROUNDS=3):
  *   Round 1: 0–10 min
  *   Round 2: 10–20 min
- *   ...
- *   Round 6: 50–60 min
+ *   Round 3: 20–30 min  (batch = 30 min total)
  *
- * ROUND_DURATION_MS can be overridden via env for testing.
+ * ROUND_DURATION_MS and MAX_ROUNDS are controlled by constants/testConfig.js.
  * ============================================================
  */
 
@@ -70,7 +69,7 @@ export async function recoverOnBoot(batchId) {
     const currentRound = completedRounds + 1;
 
     if (currentRound > MAX_ROUNDS) {
-        console.log(`[roundScheduler] Batch ${batchId} already past round 6, no recovery needed`);
+        console.log(`[roundScheduler] Batch ${batchId} already past round ${MAX_ROUNDS}, no recovery needed`);
         return;
     }
 
@@ -150,7 +149,7 @@ export function stopRoundCycle(batchId) {
  *
  * This means: even if executeRound() takes 45 seconds, the next round's
  * timer is still anchored to the original batch start, not to when
- * executeRound finished. No drift accumulates across 6 rounds.
+ * executeRound finished. No drift accumulates across rounds.
  *
  * @param {string} batchId
  * @param {number} round — 1-indexed round number
@@ -319,7 +318,7 @@ export async function broadcastResults(batchId, round) {
 
 /**
  * Increments round counter and either reopens submissions
- * or ends the cycle if we just finished round 6.
+ * or ends the cycle if we just finished the last round (MAX_ROUNDS).
  */
 export async function advanceRound(batchId, completedRound) {
     const nextRound = completedRound + 1;
