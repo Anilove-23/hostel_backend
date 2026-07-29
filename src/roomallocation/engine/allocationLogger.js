@@ -142,9 +142,9 @@ export async function logRankImport({ updated, skipped, total, uploadedBy, clien
     }
 }
 
-export async function logBatchAssignment({ hostelId, assigned, unassigned, batches, client } = {}) {
+export async function logBatchAssignment({ eventId, assigned, unassigned, batches, client } = {}) {
     try {
-        await _write('BATCH_ASSIGNMENT', { hostelId, assigned, unassigned, batches }, client);
+        await _write('BATCH_ASSIGNMENT', { eventId, assigned, unassigned, batches }, client);
     } catch (err) {
         console.error('[allocationLogger] logBatchAssignment error (swallowed):', err.message);
     }
