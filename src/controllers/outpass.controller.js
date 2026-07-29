@@ -17,7 +17,8 @@ const createOutpass = asyncHandler(async (req, res) => {
         purpose,
         departure_datetime,
         arrival_datetime,
-        parent_contact
+        parent_contact,
+        is_emergency = false
     } = req.body;
 
     const studentId = req.user?.id;
@@ -32,244 +33,360 @@ const createOutpass = asyncHandler(async (req, res) => {
         );
     }
 
-    // =================================================
-    // FETCH STUDENT + HOSTEL
-    // =================================================
+    const client = await pool.connect();
 
-    const studentQuery = `
-        SELECT
-            id,
-            hostel_id,
-            hostel,
-            name
-        FROM student
-        WHERE id = $1;
-    `;
+    try {
 
-    const studentResult = await pool.query(
-        studentQuery,
-        [studentId]
-    );
+        await client.query("BEGIN");
 
-    if (studentResult.rows.length === 0) {
-        throw new ApiError(
-            404,
-            "Student not found"
+        // =================================================
+        // FETCH STUDENT + HOSTEL
+        // =================================================
+
+        const studentQuery = `
+            SELECT
+                s.id,
+                s.hostel_id,
+                s.hostel,
+                s.name,
+                h.local_outpass_cutoff
+            FROM student s
+            JOIN hostel h
+                ON s.hostel_id = h.id
+            WHERE s.id = $1;
+        `;
+
+        const studentResult = await client.query(
+            studentQuery,
+            [studentId]
         );
-    }
 
-    const student =
-        studentResult.rows[0];
-
-    // =================================================
-    // ENSURE STUDENT ASSIGNED TO HOSTEL
-    // =================================================
-
-    if (!student.hostel_id) {
-        throw new ApiError(
-            400,
-            "Student is not assigned to any hostel"
-        );
-    }
-
-    // =================================================
-    // NORMALIZE OUTPASS TYPE
-    // =================================================
-
-    const normalizedType =
-        outpass_type.trim().toLowerCase();
-
-    if (
-        normalizedType !== "local" &&
-        normalizedType !== "outstation"
-    ) {
-        throw new ApiError(
-            400,
-            "Invalid outpass type"
-        );
-    }
-
-    const isLocalOutpass =
-        normalizedType === "local";
-
-    // =================================================
-    // AUTO HANDLE LOCAL OUTPASS
-    // =================================================
-
-    const finalPlace =
-        isLocalOutpass
-            ? "Market"
-            : place_of_visit;
-
-    const finalPurpose =
-        isLocalOutpass
-            ? "Local Visit"
-            : purpose;
-
-    // =================================================
-    // VALIDATE OUTSTATION DATA
-    // =================================================
-
-    if (
-        !isLocalOutpass &&
-        (!finalPlace || !finalPurpose)
-    ) {
-        throw new ApiError(
-            400,
-            "Place of visit and purpose required for Outstation outpass"
-        );
-    }
-
-    // =================================================
-    // CHECK EXISTING ACTIVE OUTPASS
-    // =================================================
-
-    const existingQuery = `
-        SELECT id
-        FROM outpass
-        WHERE
-            student_id = $1
-            AND is_active = true
-            AND outp_status IN (
-                'Pending',
-                'Approved'
+        if (studentResult.rows.length === 0) {
+            throw new ApiError(
+                404,
+                "Student not found"
             );
-    `;
+        }
 
-    const existingResult = await pool.query(
-        existingQuery,
-        [studentId]
-    );
+        const student =
+            studentResult.rows[0];
 
-    if (existingResult.rows.length > 0) {
-        throw new ApiError(
-            400,
-            "You already have an active outpass request"
-        );
-    }
+        // =================================================
+        // ENSURE STUDENT ASSIGNED TO HOSTEL
+        // =================================================
 
-    // =================================================
-    // VALIDATE DATE/TIME
-    // =================================================
+        if (!student.hostel_id) {
+            throw new ApiError(
+                400,
+                "Student is not assigned to any hostel"
+            );
+        }
 
-    let departure = null;
+        // =================================================
+        // NORMALIZE OUTPASS TYPE
+        // =================================================
 
-    const today = new Date()
-    if (departure_datetime) {
+        const normalizedType =
+            outpass_type.trim().toLowerCase();
 
+        const validTypes = [
+            "local",
+            "outstation",
+            "home"
+        ];
 
+        if (!validTypes.includes(normalizedType)) {
+            throw new ApiError(
+                400,
+                "Invalid outpass type"
+            );
+        }
 
-        departure =
-            new Date(departure_datetime);
+        const isLocalOutpass =
+            normalizedType === "local";
+
+        // =================================================
+        // VALIDATE EMERGENCY FLAG
+        // =================================================
+
+        if (typeof is_emergency !== "boolean") {
+            throw new ApiError(
+                400,
+                "Invalid emergency flag."
+            );
+        }
+
+        // =================================================
+        // AUTO HANDLE LOCAL OUTPASS
+        // =================================================
+
+        const trimmedPlace = place_of_visit?.trim();
+        const trimmedPurpose = purpose?.trim();
+
+        const finalPlace =
+            isLocalOutpass
+                ? (trimmedPlace || "Local")
+                : trimmedPlace;
+
+        const finalPurpose =
+            isLocalOutpass
+                ? (trimmedPurpose || "Local Visit")
+                : trimmedPurpose;
+
+        // =================================================
+        // VALIDATE HOME / OUTSTATION DATA
+        // =================================================
+
+        if (
+            !isLocalOutpass &&
+            (!finalPlace || !finalPurpose)
+        ) {
+            throw new ApiError(
+                400,
+                "Place of visit and purpose are required for Home and Outstation outpasses."
+            );
+        }
+
+        // =================================================
+        // EMERGENCY VALIDATION
+        // =================================================
+
+        if (
+            is_emergency &&
+            (!purpose || purpose.trim() === "")
+        ) {
+            throw new ApiError(
+                400,
+                "Purpose is required for emergency outpass."
+            );
+        }
+
+        // =================================================
+        // LOCAL OUTPASS CUTOFF VALIDATION
+        // =================================================
 
         if (isLocalOutpass) {
-            if (today.getDate() !== departure.getDate() || today.getMonth() !== departure.getMonth()
-                || today.getFullYear() !== departure.getFullYear()) {
-                throw new ApiError(400, "Departure must be on same day")
+
+            const now = new Date();
+
+            const currentMinutes =
+                now.getHours() * 60 +
+                now.getMinutes();
+
+            const [cutoffHour, cutoffMinute] =
+                student.local_outpass_cutoff
+                    .split(":")
+                    .map(Number);
+
+            const cutoffMinutes =
+                cutoffHour * 60 +
+                cutoffMinute;
+
+            if (
+                currentMinutes > cutoffMinutes &&
+                !is_emergency
+            ) {
+                throw new ApiError(
+                    400,
+                    "Local outpass requests are not allowed after the hostel cutoff time."
+                );
             }
         }
 
-        // Allow 30 min tolerance
-        if (
-            departure.getTime()
-            <
-            Date.now() - (1000 * 60 * 30)
-        ) {
-            throw new ApiError(
-                400,
-                "Departure time cannot be in the past"
-            );
-        }
-    }
+        // =================================================
+        // CHECK EXISTING ACTIVE OUTPASS
+        // =================================================
 
-    if (arrival_datetime) {
+        const existingQuery = `
+            SELECT outpass_type
+            FROM outpass
+            WHERE
+                student_id = $1
+                AND is_active = true
+                AND outp_status IN (
+                    'Pending',
+                    'Approved'
+                );
+        `;
 
-        const arrival =
-            new Date(arrival_datetime);
-
-        if (isLocalOutpass && (today.getDate() !== arrival.getDate() ||
-            today.getMonth() !== arrival.getMonth() || today.getFullYear() !== arrival.getFullYear()))
-            throw new ApiError(400, "Arrival must be on same day")
-
-        if (
-            departure &&
-            arrival <= departure
-        ) {
-            throw new ApiError(
-                400,
-                "Arrival time must be after departure time"
-            );
-        }
-    }
-
-    // =================================================
-    // INSERT OUTPASS
-    // =================================================
-
-    const query = `
-        INSERT INTO outpass (
-            student_id,
-            outpass_type,
-            place_of_visit,
-            purpose,
-            departure_datetime,
-            arrival_datetime,
-            parent_contact
-        )
-        VALUES (
-            $1, $2, $3, $4,
-            $5, $6, $7
-        )
-        RETURNING *;
-    `;
-
-    const values = [
-        studentId,
-        normalizedType === "local"
-            ? "Local"
-            : "Outstation",
-        finalPlace,
-        finalPurpose,
-        departure_datetime || null,
-        arrival_datetime || null,
-        parent_contact
-    ];
-
-    const result = await pool.query(
-        query,
-        values
-    );
-
-    if (
-        !result ||
-        result.rows.length === 0
-    ) {
-        throw new ApiError(
-            500,
-            "Failed to create outpass request"
+        const existingResult = await client.query(
+            existingQuery,
+            [studentId]
         );
-    }
 
-    // =================================================
-    // RESPONSE
-    // =================================================
+        const hasLocal = existingResult.rows.some(
+            row => row.outpass_type === "Local"
+        );
 
-    return res.status(201).json(
-        new ApiResponse(
-            201,
-            {
-                ...result.rows[0],
+        const hasLongTrip = existingResult.rows.some(
+            row =>
+                row.outpass_type === "Home" ||
+                row.outpass_type === "Outstation"
+        );
 
-                assigned_hostel: {
-                    hostel_id:
-                        student.hostel_id,
-                    hostel_name:
-                        student.hostel
+        if (isLocalOutpass && hasLocal) {
+            throw new ApiError(
+                400,
+                "You already have an active Local outpass."
+            );
+        }
+
+        if (!isLocalOutpass && hasLongTrip) {
+            throw new ApiError(
+                400,
+                "You already have an active Home/Outstation outpass."
+            );
+        }
+
+        // =================================================
+        // VALIDATE DATE/TIME
+        // =================================================
+
+        let departure = null;
+
+        const today = new Date()
+        if (departure_datetime) {
+
+
+
+            departure =
+                new Date(departure_datetime);
+
+            if (isNaN(departure.getTime())) {
+                throw new ApiError(
+                    400,
+                    "Invalid departure date."
+                );
+            }
+
+            if (isLocalOutpass) {
+                if (today.getDate() !== departure.getDate() || today.getMonth() !== departure.getMonth()
+                    || today.getFullYear() !== departure.getFullYear()) {
+                    throw new ApiError(400, "Departure must be on same day")
                 }
-            },
-            `Outpass request sent to ${student.hostel} successfully`
-        )
-    );
+            }
+
+            // Allow 30 min tolerance
+            if (
+                departure.getTime()
+                <
+                Date.now() - (1000 * 60 * 30)
+            ) {
+                throw new ApiError(
+                    400,
+                    "Departure time cannot be in the past"
+                );
+            }
+        }
+
+        if (arrival_datetime) {
+
+            const arrival =
+                new Date(arrival_datetime);
+
+            if (isNaN(arrival.getTime())) {
+                throw new ApiError(
+                    400,
+                    "Invalid arrival date."
+                );
+            }
+
+            if (isLocalOutpass && (today.getDate() !== arrival.getDate() ||
+                today.getMonth() !== arrival.getMonth() || today.getFullYear() !== arrival.getFullYear()))
+                throw new ApiError(400, "Arrival must be on same day")
+
+            if (
+                departure &&
+                arrival <= departure
+            ) {
+                throw new ApiError(
+                    400,
+                    "Arrival time must be after departure time"
+                );
+            }
+        }
+
+        // =================================================
+        // INSERT OUTPASS
+        // =================================================
+
+        const query = `
+            INSERT INTO outpass (
+                student_id,
+                outpass_type,
+                place_of_visit,
+                purpose,
+                departure_datetime,
+                arrival_datetime,
+                parent_contact,
+                is_emergency
+            )
+            VALUES (
+                $1, $2, $3, $4,
+                $5, $6, $7, $8
+            )
+            RETURNING *;
+        `;
+
+        const values = [
+            studentId,
+            normalizedType.charAt(0).toUpperCase() +
+                normalizedType.slice(1),
+            finalPlace,
+            finalPurpose,
+            departure_datetime || null,
+            arrival_datetime || null,
+            parent_contact,
+            is_emergency
+        ];
+
+        const result = await client.query(
+            query,
+            values
+        );
+
+        if (
+            !result ||
+            result.rows.length === 0
+        ) {
+            throw new ApiError(
+                500,
+                "Failed to create outpass request"
+            );
+        }
+
+        await client.query("COMMIT");
+
+        // =================================================
+        // RESPONSE
+        // =================================================
+
+        return res.status(201).json(
+            new ApiResponse(
+                201,
+                {
+                    ...result.rows[0],
+
+                    assigned_hostel: {
+                        hostel_id:
+                            student.hostel_id,
+                        hostel_name:
+                            student.hostel
+                    }
+                },
+                `Outpass request sent to ${student.hostel} successfully`
+            )
+        );
+
+    } catch (error) {
+
+        await client.query("ROLLBACK");
+        throw error;
+
+    } finally {
+
+        client.release();
+    }
 });
 
 /*
@@ -993,24 +1110,25 @@ const getLateReturns = asyncHandler(async (req, res) => {
 
     const hostelId = hostelResult.rows[0].hostel_id;
 
-    const query = `
-        SELECT
-            o.*,
-            s.name,
-            s.roll_no,
-            s.department,
-            vl.actual_arrival
-        FROM outpass o
-        JOIN student s
-            ON o.student_id = s.id
-        JOIN visit_log vl
-            ON vl.outpass_id = o.id
-        WHERE
-            s.hostel_id = $1
-            AND DATE(vl.actual_arrival) = $2
-            AND vl.actual_arrival::time BETWEEN $3::time AND $4::time
-        ORDER BY vl.actual_arrival DESC;
-    `;
+    const query  = `
+    SELECT
+        o.*,
+        s.name,
+        s.roll_no,
+        s.department,
+        vl.actual_arrival
+    FROM outpass o
+    JOIN student s
+        ON o.student_id = s.id
+    JOIN visit_log vl
+        ON vl.outpass_id = o.id
+    WHERE
+        s.hostel_id = $1
+        AND o.outpass_type = 'Local'
+        AND DATE(vl.actual_arrival) = $2
+        AND vl.actual_arrival::time BETWEEN $3::time AND $4::time
+    ORDER BY vl.actual_arrival DESC;
+`;;
 
     const result = await pool.query(query, [
         hostelId,
