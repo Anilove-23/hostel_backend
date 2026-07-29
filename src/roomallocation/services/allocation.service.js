@@ -452,18 +452,22 @@ class AllocationService {
         let allocationDate = student.allocation_date;
         let lobbyOpensAt = student.lobby_opens_at;
 
-        if (!hostelId) {
-            // Fallback: find any active allocation event
+        let eventId = student.group_event_id;
+
+        if (!eventId && student.current_year) {
+            // Fallback: find the active allocation event for this student's year
             const anyEventRes = await pool.query(
                 `SELECT ae.id AS event_id, ae.status AS current_phase, ae.is_paused,
                         ae.allocation_date, ae.lobby_opens_at
                  FROM allocation_event ae
-                 WHERE ae.status != 'ADMIN_MODE'
-                 ORDER BY ae.updated_at DESC
-                 LIMIT 1`
+                 WHERE ae.target_year = $1
+                 ORDER BY ae.created_at DESC
+                 LIMIT 1`,
+                 [student.current_year]
             );
             if (anyEventRes.rowCount > 0) {
                 const ev = anyEventRes.rows[0];
+                eventId = ev.event_id;
                 hostelPhase = ev.current_phase;
                 isPaused = ev.is_paused;
                 allocationDate = ev.allocation_date;
@@ -524,7 +528,7 @@ class AllocationService {
             individual_rank:        student.individual_rank ?? null,
             current_year:           student.current_year ?? null,
             // Phase / event info
-            event_id:               student.group_event_id ?? null,
+            event_id:               eventId,
             hostel_id:              hostelId,
             hostel_phase:           hostelPhase ?? 'ADMIN_MODE',
             hostel_name:            hostelName,

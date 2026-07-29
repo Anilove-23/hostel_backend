@@ -32,26 +32,27 @@ export const createGroup = async (primaryApplicantId) => {
         await client.query('BEGIN');
 
         // Check if student already in a group
-        const studentRes = await client.query(`SELECT group_id, hostel_id, individual_rank FROM student WHERE id = $1`, [primaryApplicantId]);
+        const studentRes = await client.query(`SELECT group_id, current_year, individual_rank FROM student WHERE id = $1`, [primaryApplicantId]);
         if (studentRes.rows.length === 0) throw new ApiError(404, 'Student not found');
         const student = studentRes.rows[0];
         if (student.group_id) throw new ApiError(400, 'Student is already in a group');
 
-        // Check event phase for student's year
-        // Prefer group's event if they have one; fallback to current_year lookup
+        // Fetch the allocation event for the student's year
         const eventRes = await client.query(
-            `SELECT ae.status AS current_phase
+            `SELECT ae.id AS event_id, ae.status AS current_phase
              FROM allocation_event ae
-             JOIN event_hostel_participation ehp ON ehp.allocation_event_id = ae.id
-             WHERE ehp.hostel_id = $1
-               AND ae.target_year = (
-                   SELECT current_year FROM student WHERE id = $2
-               )
+             WHERE ae.target_year = $1
              ORDER BY ae.created_at DESC
              LIMIT 1`,
-            [student.hostel_id, primaryApplicantId]
+            [student.current_year]
         );
-        const currentPhase = eventRes.rows[0]?.current_phase ?? 'ADMIN_MODE';
+        
+        if (eventRes.rowCount === 0) {
+            throw new ApiError(404, 'No active allocation event found for your year.');
+        }
+
+        const eventId = eventRes.rows[0].event_id;
+        const currentPhase = eventRes.rows[0].current_phase;
 
         let status = 'FORMING';
         let batchId = null;
@@ -65,11 +66,10 @@ export const createGroup = async (primaryApplicantId) => {
                 `SELECT id
                  FROM group_shatter_history
                  WHERE student_id = $1
-                   AND hostel_id = $2
                    AND consumed_at IS NULL
                  ORDER BY shattered_at DESC
                  LIMIT 1`,
-                [primaryApplicantId, student.hostel_id]
+                [primaryApplicantId]
             );
 
             if (shatterRes.rowCount === 0) {
@@ -87,10 +87,10 @@ export const createGroup = async (primaryApplicantId) => {
                 FROM batch b
                 LEFT JOIN housing_group hg ON hg.batch_id = b.id
                 LEFT JOIN student s ON s.id = hg.primary_applicant_id
-                WHERE b.hostel_id = $1
+                WHERE b.allocation_event_id = $1
                 GROUP BY b.id, b.batch_number
                 ORDER BY b.batch_number ASC
-            `, [student.hostel_id]);
+            `, [eventId]);
 
             let idealBatchIndex = batchesRes.rows.findIndex(b => parseInt(b.max_rank) >= student.individual_rank || parseInt(b.max_rank) === 0);
             
@@ -112,8 +112,8 @@ export const createGroup = async (primaryApplicantId) => {
 
         // Create group
         const groupRes = await client.query(
-            `INSERT INTO housing_group (primary_applicant_id, status, batch_id) VALUES ($1, $2, $3) RETURNING *`,
-            [primaryApplicantId, status, batchId]
+            `INSERT INTO housing_group (primary_applicant_id, status, batch_id, allocation_event_id) VALUES ($1, $2, $3, $4) RETURNING *`,
+            [primaryApplicantId, status, batchId, eventId]
         );
         const group = groupRes.rows[0];
 
@@ -412,14 +412,21 @@ export const getAllRequests = async () => {
 /**
  * Get all housing groups (admin / debug view)
  */
-export const getAllGroups = async () => {
+export const getAllGroups = async (eventId) => {
     try {
-        const result = await pool.query(
-            `SELECT h.*, s.name as leader_name 
+        let query = `SELECT h.*, s.name as leader_name 
              FROM v_housing_group_with_size h
-             LEFT JOIN student s ON h.primary_applicant_id = s.id
-             ORDER BY h.id`
-        );
+             LEFT JOIN student s ON h.primary_applicant_id = s.id`;
+        let params = [];
+        
+        if (eventId) {
+            query += ` WHERE h.allocation_event_id = $1`;
+            params.push(eventId);
+        }
+        
+        query += ` ORDER BY h.id`;
+        
+        const result = await pool.query(query, params);
         return result.rows;
     } catch (error) {
         throw new ApiError(500, 'Error fetching groups: ' + error.message);
