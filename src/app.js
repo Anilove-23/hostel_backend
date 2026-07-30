@@ -27,6 +27,9 @@ import outpassRoutesWorking from "../working-routes/outpass.js";
 // Face Authentication Routes
 import faceAuthRoutes from "./face-auth/routes/face.routes.js";
 
+// Logging Routes
+import { logRouter } from "./logging/index.js";
+
 const app = express();
 
 /*
@@ -130,6 +133,9 @@ app.use("/api/students", studentRoutes);
 
 // Face Authentication
 app.use("/api/face-auth", faceAuthRoutes);
+
+// Logging System
+app.use("/api/logs", logRouter);
 
 // === Room Allocation ===
 app.use("/api/groups", groupRoutes);

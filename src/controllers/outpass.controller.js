@@ -2,6 +2,7 @@ import asyncHandler from "../utils/asyncHandler.js";
 import pool from "../db/pool.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { logStudentActivity, StudentAction } from "../logging/index.js";
 
 /*
 =================================================
@@ -254,11 +255,25 @@ const createOutpass = asyncHandler(async (req, res) => {
     // RESPONSE
     // =================================================
 
+    const createdOutpass = result.rows[0];
+
+    // Log student activity asynchronously
+    logStudentActivity({
+        studentId,
+        action: StudentAction.OUTPASS_CREATED,
+        entityId: createdOutpass.id,
+        entityType: 'outpass',
+        metadata: {
+            outpass_type: createdOutpass.outpass_type,
+            place_of_visit: createdOutpass.place_of_visit,
+        },
+    });
+
     return res.status(201).json(
         new ApiResponse(
             201,
             {
-                ...result.rows[0],
+                ...createdOutpass,
 
                 assigned_hostel: {
                     hostel_id:
