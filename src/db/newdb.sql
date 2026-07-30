@@ -81,7 +81,8 @@ CREATE TABLE hostel (
     name           VARCHAR(255) UNIQUE NOT NULL,
     type           VARCHAR(100),
     total_capacity INT DEFAULT 0,
-    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+    created_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    local_outpass_cutoff TIME NOT NULL DEFAULT '17:00:00'
 );
 
 CREATE TABLE admin (
@@ -322,7 +323,7 @@ CREATE TABLE complaint (
 CREATE TABLE outpass (
     id SERIAL PRIMARY KEY,
     student_id INTEGER NOT NULL REFERENCES student(id) ON DELETE CASCADE,
-    outpass_type VARCHAR(50) NOT NULL CHECK (outpass_type IN ('Local', 'Outstation')),
+    outpass_type VARCHAR(50) NOT NULL CHECK (outpass_type IN ('Home', 'Local', 'Outstation')),
     place_of_visit VARCHAR(255),
     purpose TEXT,
     departure_datetime TIMESTAMP,
@@ -334,8 +335,23 @@ CREATE TABLE outpass (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     approved_at TIMESTAMP,
-    approved_by INTEGER REFERENCES attendent(id) ON DELETE SET NULL
+    approved_by INTEGER REFERENCES attendent(id) ON DELETE SET NULL,
+    is_emergency BOOLEAN NOT NULL DEFAULT FALSE
 );
+
+CREATE TABLE outpass_remarks (
+    id SERIAL PRIMARY KEY,
+    outpass_id INTEGER NOT NULL
+        REFERENCES outpass(id) ON DELETE CASCADE,
+    admin_id INTEGER NOT NULL,
+    admin_role VARCHAR(20) NOT NULL
+        CHECK (admin_role IN ('ATTENDANT','CHIEF_WARDEN','GUARD','SYSTEM')),
+    remark TEXT NOT NULL,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX idx_outpass_remarks_outpass_id
+ON outpass_remarks(outpass_id);
 
 CREATE TABLE visit_log (
     id SERIAL PRIMARY KEY,

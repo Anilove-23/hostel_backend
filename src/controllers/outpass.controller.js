@@ -165,33 +165,7 @@ const createOutpass = asyncHandler(async (req, res) => {
         // LOCAL OUTPASS CUTOFF VALIDATION
         // =================================================
 
-        if (isLocalOutpass) {
 
-            const now = new Date();
-
-            const currentMinutes =
-                now.getHours() * 60 +
-                now.getMinutes();
-
-            const [cutoffHour, cutoffMinute] =
-                student.local_outpass_cutoff
-                    .split(":")
-                    .map(Number);
-
-            const cutoffMinutes =
-                cutoffHour * 60 +
-                cutoffMinute;
-
-            if (
-                currentMinutes > cutoffMinutes &&
-                !is_emergency
-            ) {
-                throw new ApiError(
-                    400,
-                    "Local outpass requests are not allowed after the hostel cutoff time."
-                );
-            }
-        }
 
         // =================================================
         // CHECK EXISTING ACTIVE OUTPASS
@@ -306,6 +280,31 @@ const createOutpass = asyncHandler(async (req, res) => {
             }
         }
 
+        if (isLocalOutpass && departure) {
+    const departureMinutes =
+        departure.getHours() * 60 +
+        departure.getMinutes();
+
+    const [cutoffHour, cutoffMinute] =
+        student.local_outpass_cutoff
+            .split(":")
+            .map(Number);
+
+    const cutoffMinutes =
+        cutoffHour * 60 +
+        cutoffMinute;
+
+    if (
+        departureMinutes > cutoffMinutes &&
+        !is_emergency
+    ) {
+        throw new ApiError(
+            400,
+            "Local outpass departure cannot be after the hostel cutoff time."
+        );
+    }
+}
+
         // =================================================
         // INSERT OUTPASS
         // =================================================
@@ -331,7 +330,7 @@ const createOutpass = asyncHandler(async (req, res) => {
         const values = [
             studentId,
             normalizedType.charAt(0).toUpperCase() +
-                normalizedType.slice(1),
+            normalizedType.slice(1),
             finalPlace,
             finalPurpose,
             departure_datetime || null,
@@ -438,7 +437,8 @@ const bulkOutpassAction = asyncHandler(async (req, res) => {
 
     const {
         outpass_ids,
-        action
+        action,
+        remark
     } = req.body;
 
     /* ================= VALIDATION ================= */
@@ -465,145 +465,228 @@ const bulkOutpassAction = asyncHandler(async (req, res) => {
         );
     }
 
-    /* ================= ATTENDENT HOSTEL ================= */
+    /* ================= DEDUPLICATE & VALIDATE IDS ================= */
 
-    const hostelQuery = `
-        SELECT hostel_id
-        FROM attendent
-        WHERE id = $1
-        LIMIT 1;
-    `;
-
-    const hostelResult =
-        await pool.query(
-            hostelQuery,
-            [req.user.id]
-        );
+    const uniqueIds =
+        [...new Set(outpass_ids)];
 
     if (
-        hostelResult.rows.length === 0
+        !uniqueIds.every(
+            id => Number.isInteger(id) && id > 0
+        )
     ) {
 
         throw new ApiError(
-            404,
-            "Attendent not found"
-        );
-    }
-
-    const hostelId =
-        hostelResult.rows[0]
-            .hostel_id;
-
-    /* ================= VERIFY OUTPASSES ================= */
-
-    const verifyQuery = `
-        SELECT
-            o.id
-
-        FROM outpass o
-
-        JOIN student s
-        ON o.student_id = s.id
-
-        WHERE
-            o.id = ANY($1)
-            AND s.hostel_id = $2
-            AND o.outp_status = 'Pending'
-            AND o.is_active = true;
-    `;
-
-    const verifyResult =
-        await pool.query(
-            verifyQuery,
-            [
-                outpass_ids,
-                hostelId
-            ]
-        );
-
-    const validIds =
-        verifyResult.rows.map(
-            (row) => row.id
-        );
-
-    if (validIds.length === 0) {
-
-        throw new ApiError(
             400,
-            "No valid pending outpasses found"
+            "Invalid outpass IDs."
         );
     }
 
-    /* ================= ACTION CONFIG ================= */
+    /* ================= REMARK VALIDATION ================= */
 
-    let status =
-        "Approved";
-
-    let active =
-        true;
+    const trimmedRemark =
+        remark?.trim();
 
     if (action === "reject") {
 
-        status =
-            "Rejected";
+        if (
+            !remark ||
+            trimmedRemark === ""
+        ) {
 
-        active =
-            false;
+            throw new ApiError(
+                400,
+                "Remark is required while rejecting outpasses."
+            );
+        }
     }
 
-    /* ================= UPDATE ================= */
+    const client = await pool.connect();
 
-    const updateQuery = `
-        UPDATE outpass
+    try {
 
-        SET
-            outp_status = $1,
+        await client.query("BEGIN");
 
-            is_active = $2,
+        /* ================= ATTENDENT HOSTEL ================= */
 
-            approved_by = $3,
+        const hostelQuery = `
+            SELECT hostel_id
+            FROM attendent
+            WHERE id = $1
+            LIMIT 1;
+        `;
 
-            approved_at =
-                CURRENT_TIMESTAMP,
+        const hostelResult =
+            await client.query(
+                hostelQuery,
+                [req.user.id]
+            );
 
-            updated_at =
-                CURRENT_TIMESTAMP
+        if (
+            hostelResult.rows.length === 0
+        ) {
 
-        WHERE id = ANY($4)
+            throw new ApiError(
+                404,
+                "Attendent not found"
+            );
+        }
 
-        RETURNING *;
-    `;
+        const hostelId =
+            hostelResult.rows[0]
+                .hostel_id;
 
-    const updateResult =
-        await pool.query(
-            updateQuery,
-            [
-                status,
-                active,
-                req.user.id,
-                validIds
-            ]
+        /* ================= VERIFY OUTPASSES ================= */
+
+        const verifyQuery = `
+            SELECT
+                o.id
+
+            FROM outpass o
+
+            JOIN student s
+            ON o.student_id = s.id
+
+            WHERE
+                o.id = ANY($1)
+                AND s.hostel_id = $2
+                AND o.outp_status = 'Pending'
+                AND o.is_active = true;
+        `;
+
+        const verifyResult =
+            await client.query(
+                verifyQuery,
+                [
+                    uniqueIds,
+                    hostelId
+                ]
+            );
+
+        const validIds =
+            verifyResult.rows.map(
+                (row) => row.id
+            );
+
+        if (validIds.length === 0) {
+
+            throw new ApiError(
+                400,
+                "No valid pending outpasses found"
+            );
+        }
+
+        /* ================= ACTION CONFIG ================= */
+
+        let status =
+            "Approved";
+
+        let active =
+            true;
+
+        if (action === "reject") {
+
+            status =
+                "Rejected";
+
+            active =
+                false;
+        }
+
+        /* ================= UPDATE ================= */
+
+        const updateQuery = `
+            UPDATE outpass
+
+            SET
+                outp_status = $1,
+
+                is_active = $2,
+
+                approved_by = $3,
+
+                approved_at =
+                    CURRENT_TIMESTAMP,
+
+                updated_at =
+                    CURRENT_TIMESTAMP
+
+            WHERE id = ANY($4)
+
+            RETURNING *;
+        `;
+
+        const updateResult =
+            await client.query(
+                updateQuery,
+                [
+                    status,
+                    active,
+                    req.user.id,
+                    validIds
+                ]
+            );
+
+        /* ================= INSERT REJECTION REMARKS ================= */
+
+        if (action === "reject") {
+
+            const remarkQuery = `
+                INSERT INTO outpass_remarks (
+                    outpass_id,
+                    admin_id,
+                    admin_role,
+                    remark
+                )
+                SELECT
+                    UNNEST($1::int[]),
+                    $2,
+                    $3,
+                    $4;
+            `;
+
+            await client.query(
+                remarkQuery,
+                [
+                    validIds,
+                    req.user.id,
+                    "ATTENDANT",
+                    trimmedRemark
+                ]
+            );
+        }
+
+        await client.query("COMMIT");
+
+        /* ================= RESPONSE ================= */
+
+        return res.status(200).json(
+
+            new ApiResponse(
+                200,
+                {
+                    action,
+
+                    affected_count:
+                        updateResult.rows.length,
+
+                    outpasses:
+                        updateResult.rows,
+                },
+
+                `Bulk ${action} successful`
+            )
         );
 
-    /* ================= RESPONSE ================= */
+    } catch (error) {
 
-    return res.status(200).json(
+        await client.query("ROLLBACK");
+        throw error;
 
-        new ApiResponse(
-            200,
-            {
-                action,
+    } finally {
 
-                affected_count:
-                    updateResult.rows.length,
-
-                outpasses:
-                    updateResult.rows,
-            },
-
-            `Bulk ${action} successful`
-        )
-    );
+        client.release();
+    }
 });
 /*
 =================================================
@@ -615,14 +698,33 @@ const getActiveOutpass = asyncHandler(async (req, res) => {
 
     const studentId = req.user?.id;
 
-    if (!studentId) throw new ApiError(400, "Login with valid Id")
+    if (!studentId) {
+        throw new ApiError(
+            400,
+            "Login with valid credentials"
+        );
+    }
 
     const query = `
-        SELECT *
-        FROM outpass
-        WHERE student_id = $1
-        AND is_active = true
-        LIMIT 1;
+        SELECT
+            o.*,
+            s.hostel,
+            s.hostel_id
+        FROM outpass o
+
+        JOIN student s
+        ON o.student_id = s.id
+
+        WHERE
+            o.student_id = $1
+            AND o.is_active = true
+
+        ORDER BY
+            CASE
+                WHEN o.outpass_type = 'Local' THEN 1
+                ELSE 2
+            END,
+            o.created_at DESC;
     `;
 
     const result = await pool.query(
@@ -633,8 +735,8 @@ const getActiveOutpass = asyncHandler(async (req, res) => {
     return res.status(200).json(
         new ApiResponse(
             200,
-            result.rows[0] || null,
-            "Active outpass fetched successfully"
+            result.rows,
+            "Active outpasses fetched successfully"
         )
     );
 });
@@ -651,29 +753,68 @@ const getOutpassById = asyncHandler(async (req, res) => {
 
     const studentId = req.user?.id;
 
-    const query = `
-        SELECT *
-        FROM outpass
-        WHERE id = $1
-        AND student_id = $2;
+    if (!studentId) {
+        throw new ApiError(
+            400,
+            "Login with valid credentials"
+        );
+    }
+
+    if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+        throw new ApiError(
+            400,
+            "Invalid outpass ID"
+        );
+    }
+
+    const outpassQuery = `
+        SELECT
+            o.*,
+            s.hostel,
+            s.hostel_id
+        FROM outpass o
+        JOIN student s
+        ON o.student_id = s.id
+        WHERE
+            o.id = $1
+            AND o.student_id = $2;
     `;
 
-    const result = await pool.query(
-        query,
-        [id, studentId]
+    const outpassResult = await pool.query(
+        outpassQuery,
+        [Number(id), studentId]
     );
 
-    if (result.rows.length === 0) {
+    if (outpassResult.rows.length === 0) {
         throw new ApiError(
             404,
             "Outpass not found"
         );
     }
 
+    const remarksQuery = `
+        SELECT
+            admin_id,
+            admin_role,
+            remark,
+            created_at
+        FROM outpass_remarks
+        WHERE outpass_id = $1
+        ORDER BY created_at ASC;
+    `;
+
+    const remarksResult = await pool.query(
+        remarksQuery,
+        [Number(id)]
+    );
+
     return res.status(200).json(
         new ApiResponse(
             200,
-            result.rows[0],
+            {
+                outpass: outpassResult.rows[0],
+                remarks: remarksResult.rows
+            },
             "Outpass fetched successfully"
         )
     );
@@ -691,57 +832,103 @@ const cancelOutpass = asyncHandler(async (req, res) => {
 
     const studentId = req.user?.id;
 
-    const existingQuery = `
-        SELECT *
-        FROM outpass
-        WHERE id = $1
-        AND student_id = $2;
-    `;
-
-    const existingResult = await pool.query(
-        existingQuery,
-        [id, studentId]
-    );
-
-    if (existingResult.rows.length === 0) {
-        throw new ApiError(
-            404,
-            "Outpass not found"
-        );
-    }
-
-    const outpass =
-        existingResult.rows[0];
-
-    if (outpass.std_status === "Out") {
+    if (!studentId) {
         throw new ApiError(
             400,
-            "Cannot cancel after exiting campus"
+            "Login with valid credentials"
         );
     }
 
-    const updateQuery = `
-        UPDATE outpass
-        SET
-            outp_status = 'Rejected',
-            is_active = false,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-        RETURNING *;
-    `;
+    if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+        throw new ApiError(
+            400,
+            "Invalid outpass ID"
+        );
+    }
 
-    const updatedResult = await pool.query(
-        updateQuery,
-        [id]
-    );
+    const client = await pool.connect();
 
-    return res.status(200).json(
-        new ApiResponse(
-            200,
-            updatedResult.rows[0],
-            "Outpass cancelled successfully"
-        )
-    );
+    try {
+
+        await client.query("BEGIN");
+
+        const existingQuery = `
+            SELECT *
+            FROM outpass
+            WHERE
+                id = $1
+                AND student_id = $2;
+        `;
+
+        const existingResult = await client.query(
+            existingQuery,
+            [Number(id), studentId]
+        );
+
+        if (existingResult.rows.length === 0) {
+            throw new ApiError(
+                404,
+                "Outpass not found"
+            );
+        }
+
+        const outpass = existingResult.rows[0];
+
+        if (!outpass.is_active) {
+            throw new ApiError(
+                400,
+                "Outpass is already inactive."
+            );
+        }
+
+        if (outpass.outp_status !== "Pending") {
+            throw new ApiError(
+                400,
+                "Only pending outpasses can be cancelled."
+            );
+        }
+
+        if (outpass.std_status === "Out") {
+            throw new ApiError(
+                400,
+                "Cannot cancel after exiting campus."
+            );
+        }
+
+        const updateQuery = `
+            UPDATE outpass
+            SET
+                outp_status = 'Rejected',
+                is_active = false,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = $1
+            RETURNING *;
+        `;
+
+        const updatedResult = await client.query(
+            updateQuery,
+            [Number(id)]
+        );
+
+        await client.query("COMMIT");
+
+        return res.status(200).json(
+            new ApiResponse(
+                200,
+                updatedResult.rows[0],
+                "Outpass cancelled successfully"
+            )
+        );
+
+    } catch (error) {
+
+        await client.query("ROLLBACK");
+        throw error;
+
+    } finally {
+
+        client.release();
+    }
 });
 
 /*
@@ -752,11 +939,18 @@ HOSTEL-WISE MMCA ACCESS
 */
 const getPendingOutpasses = asyncHandler(async (req, res) => {
 
-    const page =
-        parseInt(req.query.page) || 1;
+    const page = Math.max(
+        1,
+        parseInt(req.query.page, 10) || 1
+    );
 
-    const limit =
-        parseInt(req.query.limit) || 10;
+    const limit = Math.min(
+        100,
+        Math.max(
+            1,
+            parseInt(req.query.limit, 10) || 10
+        )
+    );
 
     const offset =
         (page - 1) * limit;
@@ -797,29 +991,30 @@ const getPendingOutpasses = asyncHandler(async (req, res) => {
 
     const query = `
         SELECT
-            o.id,
-            o.student_id,
-            o.outpass_type,
-            o.place_of_visit,
-            o.purpose,
-            o.departure_datetime,
-            o.arrival_datetime,
-            o.parent_contact,
-            o.is_active,
-            o.outp_status,
-            o.std_status,
-            o.created_at,
-            o.updated_at,
-            o.approved_at,
+    o.id,
+    o.student_id,
+    o.outpass_type,
+    o.place_of_visit,
+    o.purpose,
+    o.departure_datetime,
+    o.arrival_datetime,
+    o.parent_contact,
+    o.is_emergency,
+    o.is_active,
+    o.outp_status,
+    o.std_status,
+    o.created_at,
+    o.updated_at,
+    o.approved_at,
 
-            s.name,
-            s.email,
-            s.roll_no,
-            s.phone,
-            s.department,
-            r.room_number AS room,
-            s.hostel,
-            s.hostel_id
+    s.name,
+    s.email,
+    s.roll_no,
+    s.phone,
+    s.department,
+    r.room_number AS room,
+    s.hostel,
+    s.hostel_id
 
         FROM outpass o
 
@@ -915,86 +1110,163 @@ APPROVE OUTPASS
 const approveOutpass = asyncHandler(async (req, res) => {
 
     const { id } = req.params;
-    const attendentId = req.user?.id
+    const attendentId = req.user?.id;
+    const { remark } = req.body;
+
+    /* ================= VALIDATION ================= */
 
     if (!id || !attendentId) {
         throw new ApiError(400, "Outpass Id or Admin Id is missing")
     }
 
-    const hostelQuery = `
-    SELECT hostel_id
-    FROM attendent
-    WHERE id = $1
-    LIMIT 1;
-`;
+    const outpassId = Number(id);
 
-    const hostelResult = await pool.query(
-        hostelQuery,
-        [attendentId]
-    );
+    if (
+        !Number.isInteger(outpassId) ||
+        outpassId <= 0
+    ) {
 
-    if (hostelResult.rows.length === 0) {
         throw new ApiError(
-            404,
-            "Attendent not found"
+            400,
+            "Invalid outpass id"
         );
     }
 
-    const hostelId =
-        hostelResult.rows[0].hostel_id;
+    const trimmedRemark =
+        remark?.trim();
 
-    // =========================
-    // Verify Hostel Ownership
-    // =========================
+    const client = await pool.connect();
 
-    const verifyQuery = `
-        SELECT o.id
-        FROM outpass o
-        JOIN student s
-        ON o.student_id = s.id
-        WHERE
-            o.id = $1
-            AND s.hostel_id = $2;
-    `;
+    try {
 
-    const verifyResult = await pool.query(
-        verifyQuery,
-        [id, hostelId]
-    );
+        await client.query("BEGIN");
 
-    if (verifyResult.rows.length === 0) {
-        throw new ApiError(
-            403,
-            "Unauthorized hostel access"
+        /* ================= ATTENDENT HOSTEL ================= */
+
+        const hostelQuery = `
+            SELECT hostel_id
+            FROM attendent
+            WHERE id = $1
+            LIMIT 1;
+        `;
+
+        const hostelResult = await client.query(
+            hostelQuery,
+            [attendentId]
         );
+
+        if (hostelResult.rows.length === 0) {
+            throw new ApiError(
+                404,
+                "Attendent not found"
+            );
+        }
+
+        const hostelId =
+            hostelResult.rows[0].hostel_id;
+
+        /* ================= VERIFY HOSTEL OWNERSHIP ================= */
+
+        const verifyQuery = `
+            SELECT o.id
+            FROM outpass o
+            JOIN student s
+            ON o.student_id = s.id
+            WHERE
+                o.id = $1
+                AND s.hostel_id = $2
+                AND o.outp_status = 'Pending'
+                AND o.is_active = true;
+        `;
+
+        const verifyResult = await client.query(
+            verifyQuery,
+            [outpassId, hostelId]
+        );
+
+        if (verifyResult.rows.length === 0) {
+            throw new ApiError(
+                403,
+                "Unauthorized hostel access or outpass is not pending"
+            );
+        }
+
+        /* ================= APPROVE OUTPASS ================= */
+
+        const query = `
+            UPDATE outpass
+            SET
+                outp_status = 'Approved',
+                updated_at = CURRENT_TIMESTAMP,
+                approved_at = CURRENT_TIMESTAMP,
+                approved_by = $1
+            WHERE
+                id = $2
+                AND outp_status = 'Pending'
+                AND is_active = true
+            RETURNING *;
+        `;
+
+        const result = await client.query(
+            query,
+            [attendentId, outpassId]
+        );
+
+        if (result.rows.length === 0) {
+            throw new ApiError(
+                400,
+                "Failed to approve outpass"
+            );
+        }
+
+        /* ================= INSERT REMARK ================= */
+
+        if (trimmedRemark) {
+
+            const remarkQuery = `
+                INSERT INTO outpass_remarks (
+                    outpass_id,
+                    admin_id,
+                    admin_role,
+                    remark
+                )
+                VALUES (
+                    $1, $2, $3, $4
+                );
+            `;
+
+            await client.query(
+                remarkQuery,
+                [
+                    outpassId,
+                    attendentId,
+                    "ATTENDANT",
+                    trimmedRemark
+                ]
+            );
+        }
+
+        await client.query("COMMIT");
+
+        /* ================= RESPONSE ================= */
+
+        return res.status(200).json(
+            new ApiResponse(
+                200,
+                result.rows[0],
+                "Outpass approved successfully"
+            )
+        );
+
+    } catch (error) {
+
+        await client.query("ROLLBACK");
+        throw error;
+
+    } finally {
+
+        client.release();
     }
-
-    const query = `
-        UPDATE outpass
-    SET
-    outp_status = 'Approved',
-    updated_at = CURRENT_TIMESTAMP,
-    approved_at = CURRENT_TIMESTAMP,
-    approved_by = $1
-    WHERE
-    id = $2
-    AND outp_status = 'Pending'
-    AND is_active = true
-    RETURNING *;
-    `;
-
-    const result = await pool.query(
-        query,
-        [attendentId, id]
-    );
-
-    return res.status(200).json(
-        new ApiResponse(
-            200,
-            result.rows[0],
-            "Outpass approved successfully"
-        )
-    );
 });
 
 /*
@@ -1005,73 +1277,170 @@ REJECT OUTPASS
 const rejectOutpass = asyncHandler(async (req, res) => {
 
     const { id } = req.params;
+    const attendentId = req.user?.id;
+    const { remark } = req.body;
 
-    const hostelQuery = `
-    SELECT hostel_id
-    FROM attendent
-    WHERE id = $1
-    LIMIT 1;
-`;
+    /* ================= VALIDATION ================= */
 
-    const hostelResult = await pool.query(
-        hostelQuery,
-        [req.user.id]
-    );
+    if (!id || !attendentId) {
+        throw new ApiError(400, "Outpass Id or Admin Id is missing")
+    }
 
-    if (hostelResult.rows.length === 0) {
+    const outpassId = Number(id);
+
+    if (
+        !Number.isInteger(outpassId) ||
+        outpassId <= 0
+    ) {
+
         throw new ApiError(
-            404,
-            "Attendent not found"
+            400,
+            "Invalid outpass id"
         );
     }
 
-    const hostelId =
-        hostelResult.rows[0].hostel_id;
+    const trimmedRemark =
+        remark?.trim();
 
-    const verifyQuery = `
-        SELECT o.id
-        FROM outpass o
-        JOIN student s
-        ON o.student_id = s.id
-        WHERE
-            o.id = $1
-            AND s.hostel_id = $2;
-    `;
+    if (
+        !remark ||
+        trimmedRemark === ""
+    ) {
 
-    const verifyResult = await pool.query(
-        verifyQuery,
-        [id, hostelId]
-    );
-
-    if (verifyResult.rows.length === 0) {
         throw new ApiError(
-            403,
-            "Unauthorized hostel access"
+            400,
+            "Remark is required while rejecting outpasses."
         );
     }
 
-    const query = `
-        UPDATE outpass
-        SET
-            outp_status = 'Rejected',
-            is_active = false,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE id = $1
-        RETURNING *;
-    `;
+    const client = await pool.connect();
 
-    const result = await pool.query(
-        query,
-        [id]
-    );
+    try {
 
-    return res.status(200).json(
-        new ApiResponse(
-            200,
-            result.rows[0],
-            "Outpass rejected successfully"
-        )
-    );
+        await client.query("BEGIN");
+
+        /* ================= ATTENDENT HOSTEL ================= */
+
+        const hostelQuery = `
+            SELECT hostel_id
+            FROM attendent
+            WHERE id = $1
+            LIMIT 1;
+        `;
+
+        const hostelResult = await client.query(
+            hostelQuery,
+            [attendentId]
+        );
+
+        if (hostelResult.rows.length === 0) {
+            throw new ApiError(
+                404,
+                "Attendent not found"
+            );
+        }
+
+        const hostelId =
+            hostelResult.rows[0].hostel_id;
+
+        /* ================= VERIFY HOSTEL OWNERSHIP ================= */
+
+        const verifyQuery = `
+            SELECT o.id
+            FROM outpass o
+            JOIN student s
+            ON o.student_id = s.id
+            WHERE
+                o.id = $1
+                AND s.hostel_id = $2
+                AND o.outp_status = 'Pending'
+                AND o.is_active = true;
+        `;
+
+        const verifyResult = await client.query(
+            verifyQuery,
+            [outpassId, hostelId]
+        );
+
+        if (verifyResult.rows.length === 0) {
+            throw new ApiError(
+                403,
+                "Unauthorized hostel access or outpass is not pending"
+            );
+        }
+
+        /* ================= REJECT OUTPASS ================= */
+
+        const query = `
+            UPDATE outpass
+            SET
+                outp_status = 'Rejected',
+                is_active = false,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE
+                id = $1
+                AND outp_status = 'Pending'
+                AND is_active = true
+            RETURNING *;
+        `;
+
+        const result = await client.query(
+            query,
+            [outpassId]
+        );
+
+        if (result.rows.length === 0) {
+            throw new ApiError(
+                400,
+                "Failed to reject outpass"
+            );
+        }
+
+        /* ================= INSERT REMARK ================= */
+
+        const remarkQuery = `
+            INSERT INTO outpass_remarks (
+                outpass_id,
+                admin_id,
+                admin_role,
+                remark
+            )
+            VALUES (
+                $1, $2, $3, $4
+            );
+        `;
+
+        await client.query(
+            remarkQuery,
+            [
+                outpassId,
+                attendentId,
+                "ATTENDANT",
+                trimmedRemark
+            ]
+        );
+
+        await client.query("COMMIT");
+
+        /* ================= RESPONSE ================= */
+
+        return res.status(200).json(
+            new ApiResponse(
+                200,
+                result.rows[0],
+                "Outpass rejected successfully"
+            )
+        );
+
+    } catch (error) {
+
+        await client.query("ROLLBACK");
+        throw error;
+
+    } finally {
+
+        client.release();
+    }
 });
 
 /*
@@ -1110,7 +1479,7 @@ const getLateReturns = asyncHandler(async (req, res) => {
 
     const hostelId = hostelResult.rows[0].hostel_id;
 
-    const query  = `
+    const query = `
     SELECT
         o.*,
         s.name,
