@@ -861,6 +861,72 @@ const getOutpassDetails = asyncHandler(async (req, res) => {
             },
             "Outpass details fetched successfully"
         )
+
+    );
+});
+    
+    export const getStudentHistory = asyncHandler(async (req, res) => {
+    const studentId = req.params.id;
+    if (!studentId) {
+        throw new ApiError(400, "Student ID is required");
+    }
+
+    // 1. Fetch Student Profile
+    const studentQuery = `
+        SELECT
+            s.id, s.name, s.roll_no, s.email, s.phone,
+            s.department, s.degree_type, s.current_year, s.joining_year,
+            s.hostel, s.hostel_id,
+            r.room_number AS room
+        FROM student s
+        LEFT JOIN room_assignment ra ON s.id = ra.student_id AND ra.assignment_status = 'ACTIVE'
+        LEFT JOIN room r ON ra.room_id = r.id
+        WHERE s.id = $1
+    `;
+    const studentResult = await pool.query(studentQuery, [studentId]);
+
+    if (studentResult.rowCount === 0) {
+        throw new ApiError(404, "Student not found");
+    }
+
+    // 2. Fetch Outpasses
+    const outpassQuery = `
+        SELECT *
+        FROM outpass
+        WHERE student_id = $1
+        ORDER BY created_at DESC
+    `;
+    
+    // 3. Fetch Visit Logs
+    const visitLogQuery = `
+        SELECT vl.*, o.outpass_type, o.place_of_visit
+        FROM visit_log vl
+        JOIN outpass o ON vl.outpass_id = o.id
+        WHERE vl.student_id = $1
+        ORDER BY vl.actual_departure DESC NULLS LAST
+    `;
+
+    // 4. Fetch Complaints
+    const complaintQuery = `
+        SELECT *
+        FROM complaint
+        WHERE student_id = $1
+        ORDER BY date_created DESC
+    `;
+
+    const [outpassResult, visitLogResult, complaintResult] = await Promise.all([
+        pool.query(outpassQuery, [studentId]),
+        pool.query(visitLogQuery, [studentId]),
+        pool.query(complaintQuery, [studentId])
+    ]);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            profile: studentResult.rows[0],
+            outpasses: outpassResult.rows,
+            visit_logs: visitLogResult.rows,
+            complaints: complaintResult.rows
+        }, "Student history fetched successfully")
     );
 });
 

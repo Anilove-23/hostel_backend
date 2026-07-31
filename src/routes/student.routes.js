@@ -8,6 +8,7 @@ import {
     getAllOutpassesByStatus,
     getHostelOutpassesByStatus,
     getOutpassDetails,
+    getStudentHistory,
     assignAttendent
 } from "../controllers/student.controller.js";
 import pool from "../db/pool.js";
