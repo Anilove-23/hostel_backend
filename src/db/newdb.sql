@@ -365,8 +365,21 @@ CREATE TABLE visit_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     gate VARCHAR(100),
-    exit_guard_id INTEGER REFERENCES guard(id) ON DELETE SET NULL
+    exit_guard_id INTEGER REFERENCES guard(id) ON DELETE SET NULL,
+    entry_guard_id INTEGER REFERENCES attendent(id) ON DELETE SET NULL
 );
+
+CREATE TABLE guard_action_log (
+    id UUID PRIMARY KEY,
+    outpass_id INTEGER NOT NULL REFERENCES outpass(id) ON DELETE CASCADE,
+    action VARCHAR(10) NOT NULL CHECK (action IN ('exit', 'enter')),
+    gate VARCHAR(100) DEFAULT 'Main Gate',
+    remark TEXT,
+    guard_id INTEGER REFERENCES attendent(id) ON DELETE SET NULL,
+    actioned_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    received_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
 
 -- =========================================================
 --  ENUM TYPES FOR LOGGING
@@ -591,6 +604,8 @@ CREATE INDEX idx_outpass_student   ON outpass(student_id);
 CREATE INDEX idx_outpass_status    ON outpass(outp_status);
 CREATE INDEX idx_visit_log_student ON visit_log(student_id);
 CREATE INDEX idx_visit_log_outpass ON visit_log(outpass_id);
+CREATE INDEX idx_gal_outpass       ON guard_action_log(outpass_id);
+CREATE INDEX idx_gal_received      ON guard_action_log(received_at);
 CREATE INDEX idx_complaint_student ON complaint(student_id);
 CREATE INDEX idx_complaint_status  ON complaint(status);
 
