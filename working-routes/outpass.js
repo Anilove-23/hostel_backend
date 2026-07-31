@@ -179,7 +179,7 @@ router.get('/by-hostel', auth, async (req, res) => {
 router.get('/all-approved', auth, async (req, res) => {
     try {
         const outpasses = await pool.query(
-            `SELECT op.*, s.name as student_name, r.room_number as student_room, s.phone as student_phone, s.department 
+            `SELECT op.*, s.name as student_name, r.room_number as student_room, s.phone as student_phone, s.department, s.degree_type 
              FROM outpass op 
              JOIN student s ON op.student_id = s.id 
              LEFT JOIN room r ON s.physical_room_id = r.id
@@ -283,7 +283,8 @@ router.get('/monitor', async (req, res) => {
                     s.name as student_name, 
                     r.room_number as student_room, 
                     s.phone as student_phone, 
-                    s.department 
+                    s.department,
+                    s.degree_type 
              FROM outpass op 
              JOIN student s ON op.student_id = s.id 
              LEFT JOIN room r ON s.physical_room_id = r.id

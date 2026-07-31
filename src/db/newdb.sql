@@ -199,6 +199,8 @@ CREATE TABLE student (
     physical_room_id  UUID REFERENCES room(id) ON DELETE SET NULL,
     allocated_room_id UUID REFERENCES room(id) ON DELETE SET NULL,
     face_enrolled    BOOLEAN DEFAULT FALSE,
+    academic_year    TEXT,
+    degree_type      TEXT,
     created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     UNIQUE (joining_year, individual_rank)
 );
@@ -699,3 +701,10 @@ BEGIN
     RETURN TRUE;
 END;
 $$ LANGUAGE plpgsql;
+
+
+CREATE TABLE IF NOT EXISTS complaint_upvotes (
+    complaint_id INTEGER REFERENCES complaint(id) ON DELETE CASCADE,
+    student_id INTEGER REFERENCES student(id) ON DELETE CASCADE,
+    PRIMARY KEY (complaint_id, student_id)
+);

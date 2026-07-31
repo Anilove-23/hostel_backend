@@ -389,7 +389,9 @@ router.post('/signup', async (req, res) => {
                 phone,
                 department,
                 rollno,
-                hostel
+                hostel,
+                degree_type,
+                academic_year
             } = data;
 
             const missingFields = [];
@@ -400,6 +402,8 @@ router.post('/signup', async (req, res) => {
             if (!department) missingFields.push('department');
             if (!rollno) missingFields.push('rollno');
             if (!hostel) missingFields.push('hostel');
+            if (!degree_type) missingFields.push('degree_type');
+            if (!academic_year) missingFields.push('academic_year');
 
             if (missingFields.length > 0) {
                 return res.status(400).json({
@@ -458,7 +462,7 @@ router.post('/signup', async (req, res) => {
             const hashedPassword = await bcrypt.hash(password, 10);
 
             result = await pool.query(
-    `INSERT INTO student
+                `INSERT INTO student
     (
         name,
         email,
@@ -467,21 +471,25 @@ router.post('/signup', async (req, res) => {
         hostel_id,
         roll_no,
         phone,
-        department
+        department,
+        degree_type,
+        academic_year
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
     RETURNING *`,
-    [
-        name,
-        email,
-        hashedPassword,
-        hostelData.name,
-        hostelData.id,
-        rollno,
-        phone,
-        department
-    ]
-);
+                [
+                    name,
+                    email,
+                    hashedPassword,
+                    hostelData.name,
+                    hostelData.id,
+                    rollno,
+                    phone,
+                    department,
+                    degree_type,
+                    academic_year
+                ]
+            );
 
             user = result.rows[0];
         }
@@ -606,41 +614,41 @@ router.post('/signup', async (req, res) => {
         }
 
         // ======================================================
-// WARDEN SIGNUP
-// ======================================================
+        // WARDEN SIGNUP
+        // ======================================================
 
-else if (data.role === 'warden') {
+        else if (data.role === 'warden') {
 
-    const {
-        name,
-        email,
-        password,
-        authority_level
-    } = data;
+            const {
+                name,
+                email,
+                password,
+                authority_level
+            } = data;
 
-    const missingFields = [];
+            const missingFields = [];
 
-    if (!name) missingFields.push('name');
-    if (!email) missingFields.push('email');
-    if (!password) missingFields.push('password');
-    if (!authority_level) missingFields.push('authority_level');
+            if (!name) missingFields.push('name');
+            if (!email) missingFields.push('email');
+            if (!password) missingFields.push('password');
+            if (!authority_level) missingFields.push('authority_level');
 
-    if (missingFields.length > 0) {
-        return res.status(400).json({
-            message: `Missing required fields for warden: ${missingFields.join(', ')}`
-        });
-    }
+            if (missingFields.length > 0) {
+                return res.status(400).json({
+                    message: `Missing required fields for warden: ${missingFields.join(', ')}`
+                });
+            }
 
-    if (![1, 2, 3].includes(Number(authority_level))) {
-        return res.status(400).json({
-            message: 'authority_level must be 1, 2, or 3'
-        });
-    }
+            if (![1, 2, 3].includes(Number(authority_level))) {
+                return res.status(400).json({
+                    message: 'authority_level must be 1, 2, or 3'
+                });
+            }
 
-    const hashedPasswordWarden = await bcrypt.hash(password, 10);
+            const hashedPasswordWarden = await bcrypt.hash(password, 10);
 
-    result = await pool.query(
-        `
+            result = await pool.query(
+                `
         INSERT INTO admin
         (
             name,
@@ -651,16 +659,16 @@ else if (data.role === 'warden') {
         VALUES ($1,$2,$3,$4)
         RETURNING *
         `,
-        [
-            name,
-            email,
-            hashedPasswordWarden,
-            authority_level
-        ]
-    );
+                [
+                    name,
+                    email,
+                    hashedPasswordWarden,
+                    authority_level
+                ]
+            );
 
-    user = result.rows[0];
-}
+            user = result.rows[0];
+        }
         // ======================================================
         // INVALID ROLE
         // ======================================================

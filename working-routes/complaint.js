@@ -197,15 +197,15 @@ router.get(
     }
 
     try {
-        const complaints = await pool.query(
-            `SELECT c.*, s.name as student_name, r.room_number as student_room, s.phone as student_phone 
+      const complaints = await pool.query(
+        `SELECT c.*, s.name as student_name, r.room_number as student_room, s.phone as student_phone 
              FROM complaint c 
              JOIN student s ON c.student_id = s.id 
              LEFT JOIN room r ON s.physical_room_id = r.id
              WHERE c.hostel = $1 AND c.status = $2 
              ORDER BY c.date_created DESC`,
-            [hostel, 'pending']
-        );
+        [hostel, 'pending']
+      );
 
       return res.status(200).json({
 
@@ -245,75 +245,75 @@ UPDATE COMPLAINT
 ================================================= */
 
 router.put('/update-complaint', auth, async (req, res) => {
-    const { complaint_id, status, resolved_description } = req.body;
-    const { id: attendant_id } = req.user;
+  const { complaint_id, status, resolved_description } = req.body;
+  const { id: attendant_id } = req.user;
 
-    if (
-      !complaint_id ||
-      !status
-    ) {
+  if (
+    !complaint_id ||
+    !status
+  ) {
 
-      return res.status(400).json({
+    return res.status(400).json({
 
-        message:
-          'complaint_id and status are required'
+      message:
+        'complaint_id and status are required'
 
-      });
-    }
+    });
+  }
 
-    try {
-        const result = await pool.query(
-            `UPDATE complaint SET status = $1, resolved_by = $2, resolved_at = NOW(), resolved_description = $3 
+  try {
+    const result = await pool.query(
+      `UPDATE complaint SET status = $1, resolved_by = $2, resolved_at = NOW(), resolved_description = $3 
              WHERE id = $4 AND status != 'resolved'
              RETURNING *`,
-            [status, attendant_id, resolved_description || null, complaint_id]
-        );
+      [status, attendant_id, resolved_description || null, complaint_id]
+    );
 
-      if (
-        result.rows.length === 0
-      ) {
+    if (
+      result.rows.length === 0
+    ) {
 
-        return res.status(404).json({
-
-          message:
-            'Complaint not found or already resolved'
-
-        });
-      }
-
-      return res.status(200).json({
+      return res.status(404).json({
 
         message:
-          'Complaint updated successfully',
+          'Complaint not found or already resolved'
 
-        complaint:
-          result.rows[0]
-      });
-
-    } catch (err) {
-
-      console.error(
-        "Error in update-complaint:",
-        err
-      );
-
-      return res.status(500).json({
-
-        message:
-          err.message ||
-          'Internal server error',
-
-        error:
-          err.toString(),
-
-        detail:
-          err.detail,
-
-        code:
-          err.code
       });
     }
+
+    return res.status(200).json({
+
+      message:
+        'Complaint updated successfully',
+
+      complaint:
+        result.rows[0]
+    });
+
+  } catch (err) {
+
+    console.error(
+      "Error in update-complaint:",
+      err
+    );
+
+    return res.status(500).json({
+
+      message:
+        err.message ||
+        'Internal server error',
+
+      error:
+        err.toString(),
+
+      detail:
+        err.detail,
+
+      code:
+        err.code
+    });
   }
+}
 );
 
 /* =================================================
@@ -330,18 +330,18 @@ router.post('/postcomplaint', auth, async (req, res) => {
 
   try {
     const result = await pool.query(
-      'INSERT INTO complaint (student_id, title, type, description, hostel) VALUES ($1, $2, $3, $4, $5) RETURNING *', 
+      'INSERT INTO complaint (student_id, title, type, description, hostel) VALUES ($1, $2, $3, $4, $5) RETURNING *',
       [student_id, title, type, description, hostel]
     );
-    
+
     return res.status(200).json({ message: 'Complaint submitted successfully', complaint: result.rows[0] });
   } catch (err) {
     console.error("Error in postcomplaint:", err);
     return res.status(500).json({
-        message: err.message || 'Internal server error',
-        error: err.toString(),
-        detail: err.detail,
-        code: err.code
+      message: err.message || 'Internal server error',
+      error: err.toString(),
+      detail: err.detail,
+      code: err.code
     });
   }
 });
@@ -412,49 +412,56 @@ router.put(
   '/upvote',
   auth,
   async (req, res) => {
-
-    const {
-      complaint_id
-    } = req.body;
+    const { complaint_id } = req.body;
+    const student_id = req.user.id;
 
     if (!complaint_id) {
-
       return res.status(400).json({
-
-        message:
-          'complaint_id is required'
-
+        message: 'complaint_id is required'
       });
     }
 
+    const client = await pool.connect();
+
     try {
+      await client.query('BEGIN');
 
-      const result =
-        await pool.query(
+      // Check if already upvoted
+      const existingVote = await client.query(
+        'SELECT * FROM complaint_upvotes WHERE complaint_id = $1 AND student_id = $2',
+        [complaint_id, student_id]
+      );
 
+      if (existingVote.rows.length > 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          message: 'You have already upvoted this complaint'
+        });
+      }
+
+      // Record upvote
+      await client.query(
+        'INSERT INTO complaint_upvotes (complaint_id, student_id) VALUES ($1, $2)',
+        [complaint_id, student_id]
+      );
+
+      const result = await client.query(
           `UPDATE complaint
-
            SET upvotes = upvotes + 1
-
            WHERE id = $1
            AND status = 'pending'
-
            RETURNING *`,
-
           [complaint_id]
         );
 
-      if (
-        result.rows.length === 0
-      ) {
-
+      if (result.rows.length === 0) {
+        await client.query('ROLLBACK');
         return res.status(404).json({
-
-          message:
-            'Complaint not found or already resolved'
-
+          message: 'Complaint not found or already resolved'
         });
       }
+
+      await client.query('COMMIT');
 
       return res.status(200).json({
 
@@ -465,28 +472,22 @@ router.put(
           result.rows[0]
       });
 
-    } catch (err) {
-
-      console.error(
-        "Error in upvote complaint:",
-        err
-      );
+      console.error("Error in upvote complaint:", err);
+      
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackErr) {
+        console.error("Error rolling back:", rollbackErr);
+      }
 
       return res.status(500).json({
-
-        message:
-          err.message ||
-          'Internal server error',
-
-        error:
-          err.toString(),
-
-        detail:
-          err.detail,
-
-        code:
-          err.code
+        message: err.message || 'Internal server error',
+        error: err.toString(),
+        detail: err.detail,
+        code: err.code
       });
+    } finally {
+      client.release();
     }
   }
 );

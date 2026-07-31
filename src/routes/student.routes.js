@@ -7,11 +7,15 @@ import {
     sortStudentsInRange,
     getAllOutpassesByStatus,
     getHostelOutpassesByStatus,
-    assignAttendent
+    assignAttendent,
+    getStudentHistory
 } from "../controllers/student.controller.js";
 import pool from "../db/pool.js";
 
 const router = Router();
+
+// GET /api/students/:id/history
+router.get('/:id/history', auth, getStudentHistory);
 
 // GET /api/students/search?q=name_or_roll  
 // Returns only id, name, roll_no (NO cgpa, NO rank) for privacy
