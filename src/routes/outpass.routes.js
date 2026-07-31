@@ -14,7 +14,8 @@ import {
     rejectOutpass,
     getLateReturns,
     recordEntry,
-    monitorDashboard
+    monitorDashboard,
+    syncGuardLogs
 } from "../controllers/outpass.controller.js";
 
 const router = Router();
@@ -93,6 +94,12 @@ router.post(
     "/record-entry",
     auth,
     recordEntry
+);
+
+router.post(
+    "/sync-logs",
+    auth,
+    syncGuardLogs
 );
 
 /*
