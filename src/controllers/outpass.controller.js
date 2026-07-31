@@ -2,6 +2,7 @@ import asyncHandler from "../utils/asyncHandler.js";
 import pool from "../db/pool.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
+import { logStudentActivity, StudentAction } from "../logging/index.js";
 
 /*
 =================================================
@@ -360,17 +361,28 @@ const createOutpass = asyncHandler(async (req, res) => {
         // RESPONSE
         // =================================================
 
+        const createdOutpass = result.rows[0];
+
+        // Log student activity asynchronously
+        logStudentActivity({
+            studentId,
+            action: StudentAction.OUTPASS_CREATED,
+            entityId: createdOutpass.id,
+            entityType: 'outpass',
+            metadata: {
+                outpass_type: createdOutpass.outpass_type,
+                place_of_visit: createdOutpass.place_of_visit,
+            },
+        });
+
         return res.status(201).json(
             new ApiResponse(
                 201,
                 {
-                    ...result.rows[0],
-
+                    ...createdOutpass,
                     assigned_hostel: {
-                        hostel_id:
-                            student.hostel_id,
-                        hostel_name:
-                            student.hostel
+                        hostel_id: student.hostel_id,
+                        hostel_name: student.hostel
                     }
                 },
                 `Outpass request sent to ${student.hostel} successfully`
@@ -1484,41 +1496,53 @@ HOSTEL-WISE
 =================================================
 */
 const getLateReturns = asyncHandler(async (req, res) => {
-    const { date, from, to } = req.query;
+    let { date, from, to } = req.query;
 
-    if (!date || !from) {
-        throw new ApiError(
-            400,
-            "Date and from time are required"
-        );
+    if (!date) {
+        date = new Date().toISOString().split('T')[0];
+    }
+    if (!from) {
+        from = "20:00:00";
     }
 
     const upperBound = to || "23:59:59";
+    const userRole = req.user?.role || '';
+    
+    let hostelId = null;
 
-    const hostelQuery = `
-        SELECT hostel_id
-        FROM attendent
-        WHERE id = $1
-        LIMIT 1;
-    `;
-
-    const hostelResult = await pool.query(hostelQuery, [req.user.id]);
-
-    if (hostelResult.rows.length === 0) {
-        throw new ApiError(
-            404,
-            "Attendent not found"
-        );
+    if (userRole === 'attendant' || userRole === 'attendent') {
+        const hostelQuery = `
+            SELECT hostel_id
+            FROM attendent
+            WHERE id = $1
+            LIMIT 1;
+        `;
+        const hostelResult = await pool.query(hostelQuery, [req.user.id]);
+        if (hostelResult.rows.length === 0) {
+            throw new ApiError(404, "Attendent not found");
+        }
+        hostelId = hostelResult.rows[0].hostel_id;
+    } else if (userRole === 'warden') {
+        const hostelQuery = `
+            SELECT hostel_id
+            FROM admin
+            WHERE id = $1
+            LIMIT 1;
+        `;
+        const hostelResult = await pool.query(hostelQuery, [req.user.id]);
+        if (hostelResult.rows.length > 0) {
+            hostelId = hostelResult.rows[0].hostel_id;
+        }
     }
+    // chief-warden has no specific hostelId restriction
 
-    const hostelId = hostelResult.rows[0].hostel_id;
-
-    const query = `
+    let query = `
     SELECT
         o.*,
         s.name,
         s.roll_no,
         s.department,
+        s.hostel,
         vl.actual_arrival
     FROM outpass o
     JOIN student s
@@ -1526,19 +1550,20 @@ const getLateReturns = asyncHandler(async (req, res) => {
     JOIN visit_log vl
         ON vl.outpass_id = o.id
     WHERE
-        s.hostel_id = $1
-        AND o.outpass_type = 'Local'
-        AND DATE(vl.actual_arrival) = $2
-        AND vl.actual_arrival::time BETWEEN $3::time AND $4::time
-    ORDER BY vl.actual_arrival DESC;
-`;;
+        o.outpass_type = 'Local'
+        AND DATE(vl.actual_arrival) = $1
+        AND vl.actual_arrival::time BETWEEN $2::time AND $3::time
+    `;
+    const params = [date, from, upperBound];
 
-    const result = await pool.query(query, [
-        hostelId,
-        date,
-        from,
-        upperBound
-    ]);
+    if (hostelId) {
+        query += ` AND s.hostel_id = $4`;
+        params.push(hostelId);
+    }
+
+    query += ` ORDER BY vl.actual_arrival DESC;`;
+
+    const result = await pool.query(query, params);
 
     return res.status(200).json(
         new ApiResponse(
@@ -1794,7 +1819,8 @@ const monitorDashboard = asyncHandler(async (req, res) => {
             r.room_number AS room,
 
             s.hostel,
-            s.hostel_id
+            s.hostel_id,
+            s.degree_type
 
         FROM outpass o
 
