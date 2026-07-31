@@ -9,7 +9,8 @@ import {
     getHostelOutpassesByStatus,
     getOutpassDetails,
     getStudentHistory,
-    assignAttendent
+    assignAttendent,
+    bulkRecordEntry
 } from "../controllers/student.controller.js";
 import pool from "../db/pool.js";
 
@@ -106,6 +107,12 @@ router.get(
     "/outpass/:id",
     auth,
     getOutpassDetails
+);
+
+router.post(
+    "/bulk-record-entry",
+    auth,
+    bulkRecordEntry
 );
 
 export default router;
