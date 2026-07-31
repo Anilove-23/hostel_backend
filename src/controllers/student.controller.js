@@ -737,9 +737,137 @@ LEFT JOIN room r
     );
 });
 
+/*
+=================================================
+GET OUTPASS DETAILS
+ADMIN (ATTENDANT)
+GET /api/admin/outpasses/:id
+=================================================
+*/
+const getOutpassDetails = asyncHandler(async (req, res) => {
+
+    const { id } = req.params;
+    const attendantId = req.user?.id;
+
+    if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+        throw new ApiError(
+            400,
+            "Invalid outpass ID"
+        );
+    }
+
+    /* ================= ATTENDANT HOSTEL ================= */
+
+    const hostelQuery = `
+        SELECT hostel_id
+        FROM attendent
+        WHERE id = $1
+        LIMIT 1;
+    `;
+
+    const hostelResult = await pool.query(
+        hostelQuery,
+        [attendantId]
+    );
+
+    if (hostelResult.rows.length === 0) {
+        throw new ApiError(
+            404,
+            "Attendant not found"
+        );
+    }
+
+    const hostelId =
+        hostelResult.rows[0].hostel_id;
+
+    /* ================= FETCH OUTPASS ================= */
+
+    const outpassQuery = `
+        SELECT
+            o.*,
+
+            s.id AS student_id,
+            s.name,
+            s.roll_no,
+            s.department,
+            s.email,
+            s.phone,
+            s.hostel,
+            s.hostel_id,
+
+            r.room_number AS room
+
+        FROM outpass o
+
+        JOIN student s
+        ON o.student_id = s.id
+
+        LEFT JOIN room_assignment ra
+        ON s.id = ra.student_id
+        AND ra.assignment_status = 'ACTIVE'
+
+        LEFT JOIN room r
+        ON ra.room_id = r.id
+
+        WHERE
+            o.id = $1
+            AND s.hostel_id = $2;
+    `;
+
+    const outpassResult = await pool.query(
+        outpassQuery,
+        [
+            Number(id),
+            hostelId
+        ]
+    );
+
+    if (outpassResult.rows.length === 0) {
+        throw new ApiError(
+            404,
+            "Outpass not found"
+        );
+    }
+
+    /* ================= FETCH REMARKS ================= */
+
+    const remarksQuery = `
+        SELECT
+            id,
+            admin_id,
+            admin_role,
+            remark,
+            created_at
+        FROM outpass_remarks
+        WHERE outpass_id = $1
+        ORDER BY
+            created_at ASC,
+            id ASC;
+    `;
+
+    const remarksResult = await pool.query(
+        remarksQuery,
+        [Number(id)]
+    );
+
+    /* ================= RESPONSE ================= */
+
+    return res.status(200).json(
+        new ApiResponse(
+            200,
+            {
+                outpass: outpassResult.rows[0],
+                remarks: remarksResult.rows
+            },
+            "Outpass details fetched successfully"
+        )
+    );
+});
+
 export {
     searchByNameOrRollno,
     sortStudentsInRange,
+    getOutpassDetails,
     getHostelOutpassesByStatus,
     getAllOutpassesByStatus,
     assignAttendent

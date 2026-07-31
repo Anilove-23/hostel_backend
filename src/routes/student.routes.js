@@ -7,6 +7,7 @@ import {
     sortStudentsInRange,
     getAllOutpassesByStatus,
     getHostelOutpassesByStatus,
+    getOutpassDetails,
     assignAttendent
 } from "../controllers/student.controller.js";
 import pool from "../db/pool.js";
@@ -95,6 +96,12 @@ router.post(
     "/status",
     auth,
     getAllOutpassesByStatus
+);
+
+router.get(
+    "/outpass/:id",
+    auth,
+    getOutpassDetails
 );
 
 export default router;

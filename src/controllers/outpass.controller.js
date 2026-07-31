@@ -406,10 +406,24 @@ const getMyOutpasses = asyncHandler(async (req, res) => {
         SELECT 
             o.*,
             s.hostel,
-            s.hostel_id
+            s.hostel_id,
+            lr.latest_remark
         FROM outpass o
         JOIN student s
         ON o.student_id = s.id
+        LEFT JOIN LATERAL (
+            SELECT
+                json_build_object(
+                    'admin_id', r.admin_id,
+                    'admin_role', r.admin_role,
+                    'remark', r.remark,
+                    'created_at', r.created_at
+                ) AS latest_remark
+            FROM outpass_remarks r
+            WHERE r.outpass_id = o.id
+            ORDER BY r.created_at DESC
+            LIMIT 1
+        ) lr ON true
         WHERE o.student_id = $1
         ORDER BY o.created_at DESC;
     `;
@@ -709,15 +723,35 @@ const getActiveOutpass = asyncHandler(async (req, res) => {
         SELECT
             o.*,
             s.hostel,
-            s.hostel_id
+            s.hostel_id,
+            COALESCE(
+                json_agg(
+                    json_build_object(
+                        'admin_id', r.admin_id,
+                        'admin_role', r.admin_role,
+                        'remark', r.remark,
+                        'created_at', r.created_at
+                    )
+                    ORDER BY r.created_at ASC
+                ) FILTER (WHERE r.id IS NOT NULL),
+                '[]'::json
+            ) AS remarks
         FROM outpass o
 
         JOIN student s
         ON o.student_id = s.id
 
+        LEFT JOIN outpass_remarks r
+        ON r.outpass_id = o.id
+
         WHERE
             o.student_id = $1
             AND o.is_active = true
+
+        GROUP BY
+            o.id,
+            s.hostel,
+            s.hostel_id
 
         ORDER BY
             CASE
