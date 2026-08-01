@@ -24,11 +24,17 @@ import authRoutes from "../working-routes/auth.js";
 import complaintRoutes from "../working-routes/complaint.js";
 import outpassRoutesWorking from "../working-routes/outpass.js";
 
+// === NEW: Our Custom Warden Room Management Routes ===
+import wardenRoomRoutes from "./routes/roomRoutes.js";
+
 // Face Authentication Routes
 import faceAuthRoutes from "./face-auth/routes/face.routes.js";
 
 // Logging Routes
 import { logRouter } from "./logging/index.js";
+
+// Late-return Notification Routes
+import { notificationRouter } from "./notifications/index.js";
 
 const app = express();
 
@@ -37,7 +43,6 @@ const app = express();
 GLOBAL MIDDLEWARES
 =====================================================
 */
-
 app.use(
     cors({
         origin: true,
@@ -60,7 +65,6 @@ app.use(cookieParser());
 REQUEST LOGGER
 =====================================================
 */
-
 app.use((req, res, next) => {
     console.log(`${req.method} ${req.originalUrl}`);
     next();
@@ -71,7 +75,6 @@ app.use((req, res, next) => {
 HEALTH CHECK ROUTES
 =====================================================
 */
-
 // Root Route
 app.get("/", (req, res) => {
     return res.status(200).json({
@@ -83,7 +86,6 @@ app.get("/", (req, res) => {
 // Debug Route
 app.post("/debug", (req, res) => {
     console.log("BODY:", req.body);
-
     return res.status(200).json({
         success: true,
         body: req.body,
@@ -113,8 +115,8 @@ app.get("/test-db", async (req, res) => {
 API ROUTES
 =====================================================
 */
-
-// Authentication
+// Auth Routes (kept at /auth to match the existing frontend's apiFetch calls;
+// also mounted at /api/auth for origin/main compatibility)
 app.use("/auth", authRoutes);
 app.use("/api/auth", authRoutes);
 
@@ -122,13 +124,13 @@ app.use("/api/auth", authRoutes);
 app.use("/complaint", complaintRoutes);
 app.use("/outpass", outpassRoutesWorking);
 
-// Outpass
+// Outpass Routes
 app.use("/api/outpasses", outpassRoutes);
 
-// Complaints
+// Complaint Routes
 app.use("/api/complaints", complaintRoutes);
 
-// Students
+// Student Routes
 app.use("/api/students", studentRoutes);
 
 // Face Authentication
@@ -137,9 +139,12 @@ app.use("/api/face-auth", faceAuthRoutes);
 // Logging System
 app.use("/api/logs", logRouter);
 
+// Late-return Notification System
+app.use("/api/notifications", notificationRouter);
+
 // === Room Allocation ===
 app.use("/api/groups", groupRoutes);
-app.use("/api/rooms", roomRoutes);
+app.use("/api/rooms", roomRoutes); // Team's existing room routes
 app.use("/api/hostels", hostelRoutes);
 app.use("/api/preferences", preferenceRoutes);
 app.use("/api/allocation", allocationRoutes);
@@ -150,12 +155,14 @@ app.use("/api/warden", wardenRoutes);
 // Import Routes
 app.use("/api/import", importRoutes);
 
+// === NEW: Connect Our Warden Room Management Module ===
+app.use("/api/v1/hostels/:hostelId/rooms", wardenRoomRoutes);
+
 /*
 =====================================================
 404 HANDLER
 =====================================================
 */
-
 app.use((req, res) => {
     return res.status(404).json({
         success: false,
@@ -168,7 +175,6 @@ app.use((req, res) => {
 GLOBAL ERROR HANDLER
 =====================================================
 */
-
 app.use((err, req, res, next) => {
     console.error(err);
 

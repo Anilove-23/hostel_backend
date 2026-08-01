@@ -296,6 +296,7 @@ router.post('/verify-otp', async (req, res) => {
         email: payload.email,
         role: payload.role,
         authority_level: payload.authority_level ?? payload.user?.authority_level,
+        hostel: payload.user?.hostel ?? null,
     });
 
     return res.status(200).json({
