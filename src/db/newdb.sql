@@ -472,29 +472,42 @@ ON auth_log(created_at);
 -- Tracks complete login sessions
 -- =========================================================
 
-CREATE TABLE user_session (
+CREATE TABLE IF NOT EXISTS user_session (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-
     actor_id INTEGER NOT NULL,
-    actor_type auth_actor_enum NOT NULL,
-
+    actor_type VARCHAR(50) NOT NULL,
+    role VARCHAR(50),
     login_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     logout_time TIMESTAMP WITH TIME ZONE,
-
     ip_address INET,
     user_agent TEXT,
-
-    -- Optional if using JWT refresh tokens
-    refresh_token_id UUID
+    refresh_token_hash TEXT,
+    refresh_expires_at TIMESTAMP WITH TIME ZONE,
+    is_active BOOLEAN DEFAULT TRUE,
+    city VARCHAR(100),
+    state VARCHAR(100),
+    country VARCHAR(100)
 );
 
-CREATE INDEX idx_session_actor
+ALTER TABLE user_session
+    ADD COLUMN IF NOT EXISTS role VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS refresh_token_hash TEXT,
+    ADD COLUMN IF NOT EXISTS refresh_expires_at TIMESTAMP WITH TIME ZONE,
+    ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS city VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS state VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS country VARCHAR(100);
+
+CREATE INDEX IF NOT EXISTS idx_user_session_actor_active
+ON user_session(actor_id, actor_type, is_active);
+
+CREATE INDEX IF NOT EXISTS idx_session_actor
 ON user_session(actor_type, actor_id);
 
-CREATE INDEX idx_session_login
+CREATE INDEX IF NOT EXISTS idx_session_login
 ON user_session(login_time);
 
-CREATE INDEX idx_session_logout
+CREATE INDEX IF NOT EXISTS idx_session_logout
 ON user_session(logout_time);
 
 

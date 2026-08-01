@@ -2,6 +2,7 @@ import { extractClient } from '../utils/extract-client.js';
 import * as authService from '../services/auth.service.js';
 import * as sessionService from '../services/session.service.js';
 import { AuthAction, ActorType } from '../enums/log.constants.js';
+import { mapActorType } from '../../utils/actorType.js';
 
 /**
  * Express middleware generator for authentication logging & user session creation.
@@ -22,7 +23,7 @@ export function authLogger(action, defaultActorType = ActorType.STUDENT) {
       // Extract actor details from req.user (set by auth middleware) or body
       const actorId = req.user?.id || body?.data?.id || body?.data?.user?.id || req.body?.actor_id || null;
       const rawRole = req.user?.role || req.headers?.role || req.body?.role || defaultActorType;
-      const actorType = (rawRole || defaultActorType).toUpperCase();
+      const actorType = mapActorType(rawRole) || mapActorType(defaultActorType) || 'STUDENT';
 
       if (actorId) {
         // Asynchronously log auth attempt (non-blocking)

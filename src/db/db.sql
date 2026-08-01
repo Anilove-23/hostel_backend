@@ -64,3 +64,7 @@ CREATE TABLE outpass (
     exit_time TIMESTAMP NULL,
     enter_time TIMESTAMP NULL
 );
+-- ==========================================
+-- Session Management
+-- ==========================================
+
