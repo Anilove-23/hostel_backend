@@ -12,7 +12,6 @@
     "test:api": "node src/roomallocation/db/test-api.js",
     "check:students": "node check_students.js",
     "start": "node index.js",
-    "dev": "nodemon index.js",
     "test": "node --experimental-vm-modules node_modules/jest/bin/jest.js --detectOpenHandles"
   },
   "dependencies": {
@@ -26,6 +25,7 @@
     "fast-csv": "^5.0.7",
     "jsonwebtoken": "^9.0.3",
     "multer": "^2.1.1",
+    "nodemailer": "^9.0.3",
     "pg": "^8.22.0",
     "pusher": "^5.3.3",
     "pusher-js": "^8.4.0",

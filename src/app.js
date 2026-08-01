@@ -33,6 +33,9 @@ import faceAuthRoutes from "./face-auth/routes/face.routes.js";
 // Logging Routes
 import { logRouter } from "./logging/index.js";
 
+// Late-return Notification Routes
+import { notificationRouter } from "./notifications/index.js";
+
 const app = express();
 
 /*
@@ -135,6 +138,9 @@ app.use("/api/face-auth", faceAuthRoutes);
 
 // Logging System
 app.use("/api/logs", logRouter);
+
+// Late-return Notification System
+app.use("/api/notifications", notificationRouter);
 
 // === Room Allocation ===
 app.use("/api/groups", groupRoutes);
