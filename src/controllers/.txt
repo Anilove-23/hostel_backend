@@ -1795,278 +1795,103 @@ MONITOR DASHBOARD
 =================================================
 */
 const monitorDashboard = asyncHandler(async (req, res) => {
-    const updated_since = req.query.updated_since;
 
-    if (updated_since) {
-        const ts = new Date(updated_since);
-        if (isNaN(ts.getTime())) {
-            throw new ApiError(400, "Invalid updated_since timestamp");
-        }
+    const page =
+        parseInt(req.query.page) || 1;
 
-        const deltaQuery = `
-            SELECT
-                o.*,
-                s.id AS student_id,
-                s.name,
-                s.roll_no,
-                s.department,
-                s.email,
-                s.phone,
-                r.room_number AS room,
-                s.hostel,
-                s.hostel_id,
-                s.degree_type
-            FROM outpass o
-            JOIN student s ON o.student_id = s.id
-            LEFT JOIN room_assignment ra ON s.id = ra.student_id AND ra.assignment_status = 'ACTIVE'
-            LEFT JOIN room r ON ra.room_id = r.id
-            WHERE (o.updated_at > $1 OR o.created_at > $1)
-              AND o.outp_status = 'Approved'
-              AND o.is_active = true
-            ORDER BY o.updated_at ASC;
-        `;
+    const limit =
+        parseInt(req.query.limit) || 10;
 
-        const result = await pool.query(deltaQuery, [ts.toISOString()]);
-
-        return res.status(200).json(
-            new ApiResponse(
-                200,
-                {
-                    outpasses: result.rows,
-                    delta: true,
-                    server_time: new Date().toISOString()
-                },
-                "Delta outpass updates fetched successfully"
-            )
-        );
-    }
-
-    const page = parseInt(req.query.page) || 1;
-    const limit = parseInt(req.query.limit) || 10;
-    const offset = (page - 1) * limit;
+    const offset =
+        (page - 1) * limit;
 
     const dataQuery = `
         SELECT
             o.*,
+
             s.id AS student_id,
             s.name,
             s.roll_no,
             s.department,
             s.email,
             s.phone,
+
             r.room_number AS room,
+
             s.hostel,
             s.hostel_id,
             s.degree_type
+
         FROM outpass o
-        JOIN student s ON o.student_id = s.id
-        LEFT JOIN room_assignment ra ON s.id = ra.student_id AND ra.assignment_status = 'ACTIVE'
-        LEFT JOIN room r ON ra.room_id = r.id
-        WHERE o.outp_status = 'Approved'
-          AND o.is_active = true
+
+        JOIN student s
+        ON o.student_id = s.id
+
+       LEFT JOIN room_assignment ra
+    ON s.id = ra.student_id
+   AND ra.assignment_status = 'ACTIVE'
+
+LEFT JOIN room r
+    ON ra.room_id = r.id
+
         ORDER BY o.created_at DESC
+
         LIMIT $1 OFFSET $2;
     `;
 
     const countQuery = `
         SELECT COUNT(*) AS total
-        FROM outpass
-        WHERE outp_status = 'Approved'
-          AND is_active = true;
+        FROM outpass;
     `;
 
-    const [result, countResult] = await Promise.all([
-        pool.query(dataQuery, [limit, offset]),
-        pool.query(countQuery)
+    const [
+        result,
+        countResult
+    ] = await Promise.all([
+        pool.query(
+            dataQuery,
+            [limit, offset]
+        ),
+        pool.query(
+            countQuery
+        )
     ]);
 
-    const total = parseInt(countResult.rows[0].total);
+    const total =
+        parseInt(
+            countResult.rows[0].total
+        );
 
     return res.status(200).json(
+
         new ApiResponse(
             200,
             {
-                outpasses: result.rows,
-                server_time: new Date().toISOString(),
+                outpasses:
+                    result.rows,
+
                 pagination: {
                     page,
                     limit,
                     total,
-                    totalPages: Math.ceil(total / limit),
-                    hasNextPage: page < Math.ceil(total / limit),
-                    hasPrevPage: page > 1
+
+                    totalPages:
+                        Math.ceil(
+                            total / limit
+                        ),
+
+                    hasNextPage:
+                        page <
+                        Math.ceil(
+                            total / limit
+                        ),
+
+                    hasPrevPage:
+                        page > 1
                 }
             },
+
             "Monitoring dashboard data fetched successfully"
-        )
-    );
-});
-
-
-/*
-=================================================
-GUARD OFFLINE SYNC
-POST /api/outpasses/sync-logs
-Receives the batch of PENDING action_logs from the guard terminal,
-replays each one against the DB, and returns synced_ids.
-=================================================
-*/
-const syncGuardLogs = asyncHandler(async (req, res) => {
-    const { logs } = req.body;
-
-    if (!Array.isArray(logs) || logs.length === 0) {
-        throw new ApiError(400, "logs array is required");
-    }
-
-    // Sort incoming logs chronologically by timestamp so exits process before entries
-    const sortedLogs = [...logs].sort((a, b) => {
-        const timeA = new Date(a.timestamp || a.actioned_at || 0).getTime();
-        const timeB = new Date(b.timestamp || b.actioned_at || 0).getTime();
-        return timeA - timeB;
-    });
-
-    const synced_ids = [];
-    const failed_ids = [];
-
-    const client = await pool.connect();
-    console.log(`[syncGuardLogs] Starting processing for ${sortedLogs.length} logs`);
-
-    try {
-        for (const log of sortedLogs) {
-            console.log(`[syncGuardLogs] Processing log: ${JSON.stringify(log)}`);
-            const { id, outpass_id, action, gate, remark, timestamp } = log;
-
-            if (!id || !outpass_id || !action) {
-                console.log(`[syncGuardLogs] Missing fields`);
-                failed_ids.push(id || 'unknown');
-                continue;
-            }
-
-            const actionedAt = timestamp ? new Date(timestamp) : new Date();
-
-            const existingLog = await client.query(
-                `SELECT id FROM guard_action_log WHERE id = $1`,
-                [id]
-            );
-
-            if (existingLog.rows.length > 0) {
-                console.log(`[syncGuardLogs] Log ${id} already exists`);
-                synced_ids.push(id);
-                continue;
-            }
-
-            try {
-                await client.query("BEGIN");
-
-                const outpassRes = await client.query(
-                    `SELECT id, student_id, outp_status, std_status, outpass_type
-                     FROM outpass WHERE id = $1 FOR UPDATE`,
-                    [outpass_id]
-                );
-
-                if (outpassRes.rows.length === 0) {
-                    await client.query("ROLLBACK");
-                    console.log(`[syncGuardLogs] Outpass not found for id ${outpass_id}`);
-                    failed_ids.push(id);
-                    continue;
-                }
-
-                const outpass = outpassRes.rows[0];
-
-                if (action === "exit") {
-                    if (outpass.std_status === "In" && outpass.outp_status === "Approved") {
-                        await client.query(
-                            `INSERT INTO visit_log (outpass_id, student_id, gate, exit_guard_id, actual_departure)
-                             VALUES ($1, $2, $3, $4, $5)`,
-                            [outpass_id, outpass.student_id, gate || "Main Gate", req.user?.id || null, actionedAt]
-                        );
-
-                        await client.query(
-                            `UPDATE outpass SET std_status = 'Out', updated_at = CURRENT_TIMESTAMP WHERE id = $1`,
-                            [outpass_id]
-                        );
-
-                        logStudentActivity({
-                            studentId: outpass.student_id,
-                            action: StudentAction.CAMPUS_EXIT,
-                            entityId: outpass_id,
-                            entityType: 'outpass',
-                            metadata: { gate: gate || 'Main Gate', remark }
-                        });
-                    } else if (outpass.std_status === "Out") {
-                        // Already out
-                    } else {
-                        await client.query("ROLLBACK");
-                        console.log(`[syncGuardLogs] Action exit failed conditions: std_status=${outpass.std_status}, outp_status=${outpass.outp_status}`);
-                        failed_ids.push(id);
-                        continue;
-                    }
-                } else if (action === "enter") {
-                    if (outpass.std_status === "Out") {
-                        await client.query(
-                            `UPDATE visit_log
-                             SET actual_arrival = $1, entry_guard_id = $2
-                             WHERE outpass_id = $3 AND actual_arrival IS NULL`,
-                            [actionedAt, req.user?.id || null, outpass_id]
-                        );
-
-                        await client.query(
-                            `UPDATE outpass
-                             SET std_status = 'In', is_active = false, updated_at = CURRENT_TIMESTAMP
-                             WHERE id = $1`,
-                            [outpass_id]
-                        );
-
-                        logStudentActivity({
-                            studentId: outpass.student_id,
-                            action: StudentAction.CAMPUS_ENTRY,
-                            entityId: outpass_id,
-                            entityType: 'outpass',
-                            metadata: { gate: gate || 'Main Gate', remark }
-                        });
-                    } else if (outpass.std_status === "In") {
-                        // Already in
-                    } else {
-                        await client.query("ROLLBACK");
-                        console.log(`[syncGuardLogs] Action enter failed conditions: std_status=${outpass.std_status}`);
-                        failed_ids.push(id);
-                        continue;
-                    }
-                } else {
-                    await client.query("ROLLBACK");
-                    console.log(`[syncGuardLogs] Unknown action: ${action}`);
-                    failed_ids.push(id);
-                    continue;
-                }
-
-                await client.query(
-                    `INSERT INTO guard_action_log (id, outpass_id, action, gate, remark, guard_id, actioned_at)
-                     VALUES ($1, $2, $3, $4, $5, $6, $7)
-                     ON CONFLICT (id) DO NOTHING`,
-                    [id, outpass_id, action, gate || "Main Gate", remark || "", req.user?.id || null, actionedAt]
-                );
-
-                await client.query("COMMIT");
-                console.log(`[syncGuardLogs] Successfully processed log ${id}`);
-                synced_ids.push(id);
-
-            } catch (err) {
-                try { await client.query("ROLLBACK"); } catch (e) {}
-                console.log(`[syncGuardLogs] Failed to sync log ${id}: ${err.message}`);
-                failed_ids.push(id);
-            }
-        }
-    } catch (fatalErr) {
-        console.log(`[syncGuardLogs] FATAL ERROR during batch: ${fatalErr.message}`);
-    } finally {
-        client.release();
-    }
-
-    return res.status(200).json(
-        new ApiResponse(
-            200,
-            { synced_ids, failed_ids },
-            `Synced ${synced_ids.length} log(s), failed ${failed_ids.length}`
         )
     );
 });
@@ -2085,6 +1910,5 @@ export {
     rejectOutpass,
     getLateReturns,
     recordEntry,
-    monitorDashboard,
-    syncGuardLogs
+    monitorDashboard
 };

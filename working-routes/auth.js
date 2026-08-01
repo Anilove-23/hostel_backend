@@ -4,17 +4,143 @@ import bcrypt from 'bcryptjs';
 import pool from '../src/db/pool.js';
 import auth from '../src/middleware/middleware.js';
 import dotenv from 'dotenv';
+import { generateOtp, storeOtp, verifyOtp } from '../src/utils/otp.js';
+
+const DEPARTMENT_PREFIXES = {
+    CSE: 'BCS',
+    ME: 'BME',
+    CE: 'BCE',
+    EE: 'BEE',
+    ECE: 'BEC',
+    MNC: 'BMA',
+    'ENGINEERING PHYSICS': 'BPH',
+    'MATERIAL SCIENCE': 'BMS',
+    ARCHITECTURE: 'BAR',
+    'DUAL DEGREE CSE': 'DCS',
+    'DUAL DEGREE ELECTRONICS': 'DEC',
+};
+
+const DEPARTMENT_ALIASES = {
+    'COMPUTER SCIENCE ENGINEERING': 'CSE',
+    'COMPUTER SCIENCE & ENGINEERING': 'CSE',
+    CSE: 'CSE',
+    'MECHANICAL ENGINEERING': 'ME',
+    ME: 'ME',
+    'CIVIL ENGINEERING': 'CE',
+    CE: 'CE',
+    'ELECTRICAL ENGINEERING': 'EE',
+    EE: 'EE',
+    'ELECTRONICS & COMMUNICATION ENGINEERING': 'ECE',
+    'ELECTRONICS AND COMMUNICATION ENGINEERING': 'ECE',
+    ECE: 'ECE',
+    'MATHEMATICS & COMPUTING': 'MNC',
+    'MATHEMATICS AND COMPUTING': 'MNC',
+    MNC: 'MNC',
+    'ENGINEERING PHYSICS': 'ENGINEERING PHYSICS',
+    BPH: 'ENGINEERING PHYSICS',
+    'MATERIAL SCIENCE': 'MATERIAL SCIENCE',
+    BMS: 'MATERIAL SCIENCE',
+    ARCHITECTURE: 'ARCHITECTURE',
+    BAR: 'ARCHITECTURE',
+    'DUAL DEGREE CSE': 'DUAL DEGREE CSE',
+    DCS: 'DUAL DEGREE CSE',
+    'DUAL DEGREE ELECTRONICS': 'DUAL DEGREE ELECTRONICS',
+    DEC: 'DUAL DEGREE ELECTRONICS',
+};
+
+const normalizeDepartment = (department) => {
+    if (!department) return '';
+
+    const trimmed = String(department).trim();
+    const upper = trimmed.toUpperCase();
+    return DEPARTMENT_ALIASES[upper] || DEPARTMENT_ALIASES[trimmed] || '';
+};
+
+const getDepartmentPrefix = (department) => {
+    const normalizedDepartment = normalizeDepartment(department);
+    return DEPARTMENT_PREFIXES[normalizedDepartment] || null;
+};
+
+const validateDepartmentRollNumber = (department, rollno) => {
+    if (!department || !rollno) return false;
+
+    const prefix = getDepartmentPrefix(department);
+    if (!prefix) return false;
+
+    const normalizedRollNo = String(rollno).trim().toUpperCase();
+    const pattern = new RegExp(`^(?:\\d{2,4})?${prefix}`);
+    return pattern.test(normalizedRollNo);
+};
+
+const validateStudentEmail = (email, rollno) => {
+    if (!email || !rollno) return false;
+
+    const normalizedEmail = String(email).trim().toLowerCase();
+    const normalizedRollNo = String(rollno).trim().toLowerCase();
+
+    if (!normalizedEmail.endsWith('@nith.ac.in')) return false;
+
+    const localPart = normalizedEmail.split('@')[0];
+    return localPart === normalizedRollNo;
+};
 
 dotenv.config();
 
 const router = express.Router();
 
+const generateToken = (payload) => jwt.sign(payload, process.env.JWT_SECRET, {
+    expiresIn: '1h'
+});
+
+const getAdminRole = (admin) => {
+    const normalizedEmail = String(admin?.email || '').toLowerCase();
+
+    if (normalizedEmail.includes('attendant')) return 'attendant';
+    if (normalizedEmail.includes('chief')) return 'chief-warden';
+    if (normalizedEmail.includes('warden')) return 'warden';
+
+    switch (Number(admin?.authority_level)) {
+        case 1:
+            return 'attendant';
+        case 2:
+            return 'warden';
+        case 3:
+            return 'chief-warden';
+        default:
+            return 'attendant';
+    }
+};
+
+const isBcryptHash = (value) => typeof value === 'string' && /^\$2[aby]\$/i.test(value);
+
+const verifyStoredPassword = async (inputPassword, storedPassword) => {
+    if (!storedPassword) return false;
+
+    if (isBcryptHash(storedPassword)) {
+        return bcrypt.compare(inputPassword, storedPassword);
+    }
+
+    return inputPassword === storedPassword;
+};
+
+const inferRoleFromEmail = (email) => {
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+
+    if (!normalizedEmail) return 'student';
+    if (normalizedEmail.includes('attendant')) return 'attendant';
+    if (normalizedEmail.includes('chief')) return 'chief-warden';
+    if (normalizedEmail.includes('guard')) return 'guard';
+    if (normalizedEmail.includes('warden')) return 'warden';
+
+    return 'student';
+};
 
 const ROLE_TABLES = {
     student: 'student',
     attendant: 'attendent',
     guard: 'guard',
-    warden: 'admin'
+    warden: 'admin',
+    'chief-warden': 'admin'
 };
 
 // ======================================================
@@ -66,11 +192,12 @@ router.get('/login', (req, res) => {
 // ======================================================
 
 router.post('/login', async (req, res) => {
-    const { email, password, role } = req.body;
+    const { email, password, role: requestedRole } = req.body || {};
+    const role = requestedRole || inferRoleFromEmail(email) || 'student';
 
-    if (!email || !password || !role) {
+    if (!email || !password) {
         return res.status(400).json({
-            message: 'Email, password and role are required'
+            message: 'Email and password are required'
         });
     }
 
@@ -83,15 +210,22 @@ router.post('/login', async (req, res) => {
     }
 
     try {
+        const lookupTables = [tableName, 'attendent', 'admin', 'guard', 'student'].filter((value, index, array) => array.indexOf(value) === index);
+        let user = null;
 
-        const result = await pool.query(
-            `SELECT * FROM ${tableName}
-             WHERE email = $1
-             LIMIT 1`,
-            [email]
-        );
+        for (const lookupTable of lookupTables) {
+            const result = await pool.query(
+                `SELECT * FROM ${lookupTable}
+                 WHERE LOWER(email) = LOWER($1)
+                 LIMIT 1`,
+                [email]
+            );
 
-        const user = result.rows[0];
+            if (result.rows[0]) {
+                user = result.rows[0];
+                break;
+            }
+        }
 
         if (!user) {
             return res.status(401).json({
@@ -99,35 +233,29 @@ router.post('/login', async (req, res) => {
             });
         }
 
-        const storedPassword = user.password_hash ?? user.password;
-        const passwordMatch = await bcrypt.compare(password, storedPassword);
+        const storedPassword =
+            user.password_hash ?? user.password;
+
+        const passwordMatch = await verifyStoredPassword(
+            password,
+            storedPassword
+        );
+
         if (!passwordMatch) {
             return res.status(401).json({
                 message: 'Invalid credentials'
             });
         }
 
-        // For warden-table logins, carry authority_level + hostel in the token so
-        // downstream RBAC middleware can scope permissions without an extra DB
-        // lookup per request. Additive only — no existing code reads these fields.
-        const tokenPayload = { id: user.id, email: user.email, role };
-        if (role === 'warden') {
-            tokenPayload.authority_level = user.authority_level ?? null;
-            tokenPayload.hostel = user.hostel ?? null;
-        }
-
-        const token = jwt.sign(
-            tokenPayload,
-            process.env.JWT_SECRET,
-            {
-                expiresIn: '1h'
-            }
-        );
+        const otp = generateOtp();
+        storeOtp(email, otp, role, user);
 
         return res.status(200).json({
-            message: 'Login successful',
-            user,
-            token
+            success: true,
+            message: 'OTP generated',
+            email,
+            role,
+            otp: process.env.NODE_ENV !== 'production' ? otp : undefined
         });
 
     } catch (err) {
@@ -142,6 +270,42 @@ router.post('/login', async (req, res) => {
     }
 });
 
+router.post('/verify-otp', async (req, res) => {
+    const { email, otp } = req.body || {};
+
+    if (!email || !otp) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid or expired OTP'
+        });
+    }
+
+    const result = verifyOtp(email, otp);
+
+    if (!result || !result.valid) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid or expired OTP'
+        });
+    }
+
+    const payload = result.payload;
+
+    const token = generateToken({
+        id: payload.id ?? payload.user?.id,
+        email: payload.email,
+        role: payload.role,
+        authority_level: payload.authority_level ?? payload.user?.authority_level,
+        hostel: payload.user?.hostel ?? null,
+    });
+
+    return res.status(200).json({
+        success: true,
+        token,
+        user: payload.user,
+        role: payload.role
+    });
+});
 
 // ======================================================
 // CURRENT USER
@@ -226,7 +390,9 @@ router.post('/signup', async (req, res) => {
                 phone,
                 department,
                 rollno,
-                hostel
+                hostel,
+                degree_type,
+                academic_year
             } = data;
 
             const missingFields = [];
@@ -237,10 +403,44 @@ router.post('/signup', async (req, res) => {
             if (!department) missingFields.push('department');
             if (!rollno) missingFields.push('rollno');
             if (!hostel) missingFields.push('hostel');
+            if (!degree_type) missingFields.push('degree_type');
+            if (!academic_year) missingFields.push('academic_year');
 
             if (missingFields.length > 0) {
                 return res.status(400).json({
                     message: `Missing required fields for student: ${missingFields.join(', ')}`
+                });
+            }
+
+            if (!validateDepartmentRollNumber(department, rollno)) {
+                return res.status(400).json({
+                    message: 'Roll number does not match the selected department.'
+                });
+            }
+
+            if (!validateStudentEmail(email, rollno)) {
+                return res.status(400).json({
+                    message: 'Email must be in the format rollno@nith.ac.in'
+                });
+            }
+
+            const existingStudent = await pool.query(
+                `SELECT email, roll_no, phone FROM student
+                 WHERE email = $1 OR roll_no = $2 OR phone = $3
+                 LIMIT 1`,
+                [email, rollno, phone]
+            );
+
+            if (existingStudent.rows.length > 0) {
+                const existing = existingStudent.rows[0];
+                const conflicts = [];
+
+                if (existing.email === email) conflicts.push('email');
+                if (existing.roll_no === rollno) conflicts.push('roll number');
+                if (existing.phone === phone) conflicts.push('phone number');
+
+                return res.status(409).json({
+                    message: `The following values already exist: ${conflicts.join(', ')}`
                 });
             }
 
@@ -263,7 +463,7 @@ router.post('/signup', async (req, res) => {
             const hashedPassword = await bcrypt.hash(password, 10);
 
             result = await pool.query(
-    `INSERT INTO student
+                `INSERT INTO student
     (
         name,
         email,
@@ -272,21 +472,25 @@ router.post('/signup', async (req, res) => {
         hostel_id,
         roll_no,
         phone,
-        department
+        department,
+        degree_type,
+        academic_year
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
     RETURNING *`,
-    [
-        name,
-        email,
-        hashedPassword,
-        hostelData.name,
-        hostelData.id,
-        rollno,
-        phone,
-        department
-    ]
-);
+                [
+                    name,
+                    email,
+                    hashedPassword,
+                    hostelData.name,
+                    hostelData.id,
+                    rollno,
+                    phone,
+                    department,
+                    degree_type,
+                    academic_year
+                ]
+            );
 
             user = result.rows[0];
         }
@@ -411,41 +615,41 @@ router.post('/signup', async (req, res) => {
         }
 
         // ======================================================
-// WARDEN SIGNUP
-// ======================================================
+        // WARDEN SIGNUP
+        // ======================================================
 
-else if (data.role === 'warden') {
+        else if (data.role === 'warden') {
 
-    const {
-        name,
-        email,
-        password,
-        authority_level
-    } = data;
+            const {
+                name,
+                email,
+                password,
+                authority_level
+            } = data;
 
-    const missingFields = [];
+            const missingFields = [];
 
-    if (!name) missingFields.push('name');
-    if (!email) missingFields.push('email');
-    if (!password) missingFields.push('password');
-    if (!authority_level) missingFields.push('authority_level');
+            if (!name) missingFields.push('name');
+            if (!email) missingFields.push('email');
+            if (!password) missingFields.push('password');
+            if (!authority_level) missingFields.push('authority_level');
 
-    if (missingFields.length > 0) {
-        return res.status(400).json({
-            message: `Missing required fields for warden: ${missingFields.join(', ')}`
-        });
-    }
+            if (missingFields.length > 0) {
+                return res.status(400).json({
+                    message: `Missing required fields for warden: ${missingFields.join(', ')}`
+                });
+            }
 
-    if (![1, 2, 3].includes(Number(authority_level))) {
-        return res.status(400).json({
-            message: 'authority_level must be 1, 2, or 3'
-        });
-    }
+            if (![1, 2, 3].includes(Number(authority_level))) {
+                return res.status(400).json({
+                    message: 'authority_level must be 1, 2, or 3'
+                });
+            }
 
-    const hashedPasswordWarden = await bcrypt.hash(password, 10);
+            const hashedPasswordWarden = await bcrypt.hash(password, 10);
 
-    result = await pool.query(
-        `
+            result = await pool.query(
+                `
         INSERT INTO admin
         (
             name,
@@ -456,16 +660,16 @@ else if (data.role === 'warden') {
         VALUES ($1,$2,$3,$4)
         RETURNING *
         `,
-        [
-            name,
-            email,
-            hashedPasswordWarden,
-            authority_level
-        ]
-    );
+                [
+                    name,
+                    email,
+                    hashedPasswordWarden,
+                    authority_level
+                ]
+            );
 
-    user = result.rows[0];
-}
+            user = result.rows[0];
+        }
         // ======================================================
         // INVALID ROLE
         // ======================================================
@@ -480,7 +684,7 @@ else if (data.role === 'warden') {
         // GENERATE JWT TOKEN
         // ======================================================
 
-        const token = jwt.sign({ id: user.id, email: user.email, role: data.role }, process.env.JWT_SECRET, { expiresIn: '1h' });
+        const token = generateToken({ id: user.id, email: user.email, role: data.role });
         return res.status(201).json({ message: 'User created successfully', user, token });
     } catch (err) {
         console.error("Signup error:", err);

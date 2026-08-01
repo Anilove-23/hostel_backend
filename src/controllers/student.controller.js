@@ -56,28 +56,37 @@ const searchByNameOrRollno = asyncHandler(async (req, res) => {
     const whereClause =
         conditions.join(" OR ");
 
-    const dataQuery = `
-        SELECT
-            id,
-            name,
-            roll_no,
-            email,
-            phone,
-            department,
-            hostel,
-            hostel_id,
-            physical_room_id,
-            created_at
+    const dataQuery = 
+        `
+    SELECT
+        s.id,
+        s.name,
+        s.roll_no,
+        s.email,
+        s.phone,
+        s.department,
+        s.hostel,
+        s.hostel_id,
+        r.room_number AS room,
+        s.created_at
 
-        FROM student
+    FROM student s
 
-        WHERE ${whereClause}
+    LEFT JOIN room_assignment ra
+        ON s.id = ra.student_id
+       AND ra.assignment_status = 'ACTIVE'
 
-        ORDER BY created_at DESC
+    LEFT JOIN room r
+        ON ra.room_id = r.id
 
-        LIMIT $${values.length + 1}
-        OFFSET $${values.length + 2};
-    `;
+    WHERE ${whereClause}
+
+    ORDER BY s.created_at DESC
+
+    LIMIT $${values.length + 1}
+    OFFSET $${values.length + 2};
+`;
+    ;
 
     const countQuery = `
         SELECT COUNT(*) AS total
@@ -213,8 +222,12 @@ const sortStudentsInRange = asyncHandler(async (req, res) => {
         JOIN outpass o
         ON o.student_id = s.id
 
-        LEFT JOIN room r
-        ON s.physical_room_id = r.id
+        LEFT JOIN room_assignment ra
+    ON s.id = ra.student_id
+   AND ra.assignment_status = 'ACTIVE'
+
+LEFT JOIN room r
+    ON ra.room_id = r.id
 
         WHERE
             o.departure_datetime <= $2
@@ -376,8 +389,12 @@ const getAllOutpassesByStatus = asyncHandler(async (req, res) => {
         JOIN student s
         ON o.student_id = s.id
 
-        LEFT JOIN room r
-        ON s.physical_room_id = r.id
+        LEFT JOIN room_assignment ra
+    ON s.id = ra.student_id
+   AND ra.assignment_status = 'ACTIVE'
+
+LEFT JOIN room r
+    ON ra.room_id = r.id
 
         WHERE
             o.outp_status = $1
@@ -625,8 +642,12 @@ const getHostelOutpassesByStatus = asyncHandler(async (req, res) => {
         JOIN student s
         ON o.student_id = s.id
 
-        LEFT JOIN room r
-        ON s.physical_room_id = r.id
+        LEFT JOIN room_assignment ra
+    ON s.id = ra.student_id
+   AND ra.assignment_status = 'ACTIVE'
+
+LEFT JOIN room r
+    ON ra.room_id = r.id
 
         WHERE
             o.outp_status = $1
@@ -716,10 +737,435 @@ const getHostelOutpassesByStatus = asyncHandler(async (req, res) => {
     );
 });
 
+/*
+=================================================
+GET OUTPASS DETAILS
+ADMIN (ATTENDANT)
+GET /api/admin/outpasses/:id
+=================================================
+*/
+const getOutpassDetails = asyncHandler(async (req, res) => {
+
+    const { id } = req.params;
+    const attendantId = req.user?.id;
+
+    if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
+        throw new ApiError(
+            400,
+            "Invalid outpass ID"
+        );
+    }
+
+    /* ================= ATTENDANT HOSTEL ================= */
+
+    const hostelQuery = `
+        SELECT hostel_id
+        FROM attendent
+        WHERE id = $1
+        LIMIT 1;
+    `;
+
+    const hostelResult = await pool.query(
+        hostelQuery,
+        [attendantId]
+    );
+
+    if (hostelResult.rows.length === 0) {
+        throw new ApiError(
+            404,
+            "Attendant not found"
+        );
+    }
+
+    const hostelId =
+        hostelResult.rows[0].hostel_id;
+
+    /* ================= FETCH OUTPASS ================= */
+
+    const outpassQuery = `
+        SELECT
+            o.*,
+
+            s.id AS student_id,
+            s.name,
+            s.roll_no,
+            s.department,
+            s.email,
+            s.phone,
+            s.hostel,
+            s.hostel_id,
+
+            r.room_number AS room
+
+        FROM outpass o
+
+        JOIN student s
+        ON o.student_id = s.id
+
+        LEFT JOIN room_assignment ra
+        ON s.id = ra.student_id
+        AND ra.assignment_status = 'ACTIVE'
+
+        LEFT JOIN room r
+        ON ra.room_id = r.id
+
+        WHERE
+            o.id = $1
+            AND s.hostel_id = $2;
+    `;
+
+    const outpassResult = await pool.query(
+        outpassQuery,
+        [
+            Number(id),
+            hostelId
+        ]
+    );
+
+    if (outpassResult.rows.length === 0) {
+        throw new ApiError(
+            404,
+            "Outpass not found"
+        );
+    }
+
+    /* ================= FETCH REMARKS ================= */
+
+    const remarksQuery = `
+        SELECT
+            id,
+            admin_id,
+            admin_role,
+            remark,
+            created_at
+        FROM outpass_remarks
+        WHERE outpass_id = $1
+        ORDER BY
+            created_at ASC,
+            id ASC;
+    `;
+
+    const remarksResult = await pool.query(
+        remarksQuery,
+        [Number(id)]
+    );
+
+    /* ================= RESPONSE ================= */
+
+    return res.status(200).json(
+        new ApiResponse(
+            200,
+            {
+                outpass: outpassResult.rows[0],
+                remarks: remarksResult.rows
+            },
+            "Outpass details fetched successfully"
+        )
+
+    );
+});
+    
+    export const getStudentHistory = asyncHandler(async (req, res) => {
+    const studentId = req.params.id;
+    if (!studentId) {
+        throw new ApiError(400, "Student ID is required");
+    }
+
+    // 1. Fetch Student Profile
+    const studentQuery = `
+        SELECT
+            s.id, s.name, s.roll_no, s.email, s.phone,
+            s.department, s.degree_type, s.current_year, s.joining_year,
+            s.hostel, s.hostel_id,
+            r.room_number AS room
+        FROM student s
+        LEFT JOIN room_assignment ra ON s.id = ra.student_id AND ra.assignment_status = 'ACTIVE'
+        LEFT JOIN room r ON ra.room_id = r.id
+        WHERE s.id = $1
+    `;
+    const studentResult = await pool.query(studentQuery, [studentId]);
+
+    if (studentResult.rowCount === 0) {
+        throw new ApiError(404, "Student not found");
+    }
+
+    // 2. Fetch Outpasses
+    const outpassQuery = `
+        SELECT *
+        FROM outpass
+        WHERE student_id = $1
+        ORDER BY created_at DESC
+    `;
+    
+    // 3. Fetch Visit Logs
+    const visitLogQuery = `
+        SELECT vl.*, o.outpass_type, o.place_of_visit
+        FROM visit_log vl
+        JOIN outpass o ON vl.outpass_id = o.id
+        WHERE vl.student_id = $1
+        ORDER BY vl.actual_departure DESC NULLS LAST
+    `;
+
+    // 4. Fetch Complaints
+    const complaintQuery = `
+        SELECT *
+        FROM complaint
+        WHERE student_id = $1
+        ORDER BY date_created DESC
+    `;
+
+    const [outpassResult, visitLogResult, complaintResult] = await Promise.all([
+        pool.query(outpassQuery, [studentId]),
+        pool.query(visitLogQuery, [studentId]),
+        pool.query(complaintQuery, [studentId])
+    ]);
+
+    return res.status(200).json(
+        new ApiResponse(200, {
+            profile: studentResult.rows[0],
+            outpasses: outpassResult.rows,
+            visit_logs: visitLogResult.rows,
+            complaints: complaintResult.rows
+        }, "Student history fetched successfully")
+    );
+});
+
+const bulkRecordEntry = asyncHandler(async (req, res) => {
+
+    const {
+        outpass_ids,
+        action,
+        gate
+    } = req.body;
+
+    const guardId = req.user?.id;
+
+    if (
+        !Array.isArray(outpass_ids) ||
+        outpass_ids.length === 0
+    ) {
+        throw new ApiError(
+            400,
+            "No outpasses selected"
+        );
+    }
+
+    if (
+        action !== "exit" &&
+        action !== "enter"
+    ) {
+        throw new ApiError(
+            400,
+            "Invalid action"
+        );
+    }
+
+    // normalize / dedupe ids defensively
+    const ids = [...new Set(outpass_ids.map((id) => Number(id)))].filter(
+        (id) => Number.isInteger(id)
+    );
+
+    if (ids.length === 0) {
+        throw new ApiError(400, "No valid outpasses selected");
+    }
+
+    const client = await pool.connect();
+
+    try {
+
+        await client.query("BEGIN");
+
+        let processed = [];
+
+        if (action === "exit") {
+
+            /* ============ ATOMIC EXIT (update + insert in one shot) ============ */
+            const result = await client.query(
+                `
+                WITH updated AS (
+                    UPDATE outpass o
+                    SET
+                        std_status = 'Out',
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE
+                        o.id = ANY($1::int[])
+                        AND o.outp_status = 'Approved'
+                        AND o.std_status IS DISTINCT FROM 'Out'
+                    RETURNING o.id AS outpass_id, o.student_id
+                ),
+                inserted AS (
+                    INSERT INTO visit_log (
+                        outpass_id,
+                        student_id,
+                        gate,
+                        exit_guard_id
+                    )
+                    SELECT
+                        outpass_id,
+                        student_id,
+                        $2,
+                        $3
+                    FROM updated
+                    RETURNING outpass_id
+                )
+                SELECT
+                    u.outpass_id,
+                    u.student_id,
+                    s.name,
+                    s.roll_no
+                FROM updated u
+                JOIN student s
+                    ON s.id = u.student_id;
+                `,
+                [ids, gate || "Main Gate", guardId]
+            );
+
+            processed = result.rows.map((row) => ({
+                outpass_id: row.outpass_id,
+                student_name: row.name,
+                roll_no: row.roll_no,
+                status: "Out"
+            }));
+
+        } else {
+
+            /* ============ ATOMIC ENTRY (update outpass + update latest visit_log) ============ */
+            const result = await client.query(
+                `
+                WITH updated AS (
+                    UPDATE outpass o
+                    SET
+                        std_status = 'In',
+                        is_active = false,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE
+                        o.id = ANY($1::int[])
+                        AND o.std_status = 'Out'
+                    RETURNING o.id AS outpass_id, o.student_id
+                ),
+                latest_visit AS (
+                    SELECT DISTINCT ON (v.outpass_id)
+                        v.id,
+                        v.outpass_id
+                    FROM visit_log v
+                    WHERE v.outpass_id IN (SELECT outpass_id FROM updated)
+                    ORDER BY v.outpass_id, v.created_at DESC
+                ),
+                updated_visit AS (
+                    UPDATE visit_log v
+                    SET
+                        actual_arrival = CURRENT_TIMESTAMP,
+                        updated_at = CURRENT_TIMESTAMP
+                    FROM latest_visit lv
+                    WHERE v.id = lv.id
+                    RETURNING v.outpass_id
+                )
+                SELECT
+                    u.outpass_id,
+                    u.student_id,
+                    s.name,
+                    s.roll_no
+                FROM updated u
+                JOIN student s
+                    ON s.id = u.student_id;
+                `,
+                [ids]
+            );
+
+            processed = result.rows.map((row) => ({
+                outpass_id: row.outpass_id,
+                student_name: row.name,
+                roll_no: row.roll_no,
+                status: "In"
+            }));
+        }
+
+        /* ============ Figure out skipped ids + reasons (single batched query) ============ */
+        const processedIds = new Set(processed.map((p) => p.outpass_id));
+        const remainingIds = ids.filter((id) => !processedIds.has(id));
+
+        let skipped = [];
+
+        if (remainingIds.length > 0) {
+
+            const statusResult = await client.query(
+                `
+                SELECT
+                    id,
+                    outp_status,
+                    std_status
+                FROM outpass
+                WHERE id = ANY($1::int[]);
+                `,
+                [remainingIds]
+            );
+
+            const statusMap = new Map(
+                statusResult.rows.map((row) => [row.id, row])
+            );
+
+            skipped = remainingIds.map((id) => {
+
+                const row = statusMap.get(id);
+
+                if (!row) {
+                    return { outpass_id: id, reason: "Not Found" };
+                }
+
+                if (action === "exit") {
+                    if (row.outp_status !== "Approved") {
+                        return { outpass_id: id, reason: "Not Approved" };
+                    }
+                    if (row.std_status === "Out") {
+                        return { outpass_id: id, reason: "Already Out" };
+                    }
+                    return { outpass_id: id, reason: "Invalid State" };
+                }
+
+                // action === "enter"
+                if (row.std_status === "In") {
+                    return { outpass_id: id, reason: "Already In" };
+                }
+                if (row.std_status !== "Out") {
+                    return { outpass_id: id, reason: "Not Out" };
+                }
+                return { outpass_id: id, reason: "Invalid State" };
+            });
+        }
+
+        await client.query("COMMIT");
+
+        return res.status(200).json(
+            new ApiResponse(
+                200,
+                {
+                    processed_count: processed.length,
+                    processed,
+                    skipped_count: skipped.length,
+                    skipped
+                },
+                `Bulk ${action} completed successfully`
+            )
+        );
+
+    } catch (error) {
+
+        await client.query("ROLLBACK");
+        throw error;
+
+    } finally {
+
+        client.release();
+
+    }
+});
+
 export {
     searchByNameOrRollno,
     sortStudentsInRange,
+    getOutpassDetails,
+    bulkRecordEntry,
     getHostelOutpassesByStatus,
     getAllOutpassesByStatus,
-    assignAttendent 
+    assignAttendent
 };

@@ -145,7 +145,8 @@ GET ALL GROUPS
 
 export const getAllGroupsController = async (req, res) => {
     try {
-        const groups = await getAllGroups();
+        const { eventId } = req.query;
+        const groups = await getAllGroups(eventId);
         res.status(200).json({ success: true, groups });
     } catch (error) {
         res.status(error.statusCode || 500).json({ success: false, message: error.message });
