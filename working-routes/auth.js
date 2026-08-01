@@ -499,17 +499,39 @@ const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
         }
 
         const userObj = createdUser || tempUser;
+        const role = tempUser.role;
+        const refreshToken = jwt.sign({ sub: userObj.id, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        const refreshTokenHash = await hashRefreshToken(refreshToken);
+        const refreshExpiresAt = new Date(Date.now() + getRefreshTokenExpiry(role));
+        const location = await lookupLocationFromIp(clientIp);
+
+        await deactivateSessions({
+            actorId: userObj.id,
+            actorType: mapActorType(role)
+        });
+
+        const session = await startSession({
+            actorId: userObj.id,
+            actorType: mapActorType(role),
+            ipAddress: clientIp,
+            userAgent,
+            role,
+            refreshTokenHash,
+            refreshExpiresAt,
+            isActive: true,
+        });
 
         const token = generateToken({
             id: userObj.id,
             email: userObj.email,
-            role: tempUser.role,
+            role,
             authority_level: userObj.authority_level,
+            sessionId: session?.id,
         });
 
         await logAuthentication({
             actorId: userObj.id,
-            actorType: tempUser.role,
+            actorType: mapActorType(role),
             action: 'SIGN_UP',
             success: true,
             ipAddress: clientIp,
@@ -518,12 +540,12 @@ const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
             endpoint: req.originalUrl,
             status: 200,
             userEmail: userObj.email,
-            role: tempUser.role,
+            role,
         });
 
         await logAuthentication({
             actorId: userObj.id,
-            actorType: tempUser.role,
+            actorType: mapActorType(role),
             action: 'SIGN_IN',
             success: true,
             ipAddress: clientIp,
@@ -531,16 +553,24 @@ const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
             eventName: 'OTP_VERIFIED',
             endpoint: req.originalUrl,
             status: 200,
+            sessionId: session?.id,
             userEmail: userObj.email,
-            role: tempUser.role,
+            role,
+            details: location || undefined,
         });
+
+        if (location && session?.id) {
+            await pool.query(`UPDATE user_session SET city = $1, state = $2, country = $3 WHERE id = $4`, [location.city, location.state, location.country, session.id]);
+        }
 
         return res.status(200).json({
             success: true,
             message: 'OTP verified and user created',
             token,
+            refreshToken,
             user: userObj,
-            role: tempUser.role
+            role,
+            sessionId: session?.id
         });
     } catch (err) {
         console.error("Error creating user during OTP verification:", err);
