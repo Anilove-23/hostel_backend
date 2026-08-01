@@ -3,6 +3,8 @@ import pool from "../db/pool.js";
 import ApiError from "../utils/ApiError.js";
 import ApiResponse from "../utils/ApiResponse.js";
 import { logStudentActivity, StudentAction } from "../logging/index.js";
+import { getOutpassWithStudentById } from "../notifications/repositories/lateReturn.repository.js";
+import { notifyLateReturn, isLateOutstationReturn } from "../notifications/services/lateReturn.service.js";
 
 /*
 =================================================
@@ -1755,6 +1757,22 @@ const recordEntry = asyncHandler(async (req, res) => {
             );
 
             await client.query("COMMIT");
+
+            // Fire-and-forget late-return notification. Purely additive:
+            // notifyLateReturn() never throws, and this is not awaited, so it
+            // cannot delay or break the entry response above.
+            const actualArrivalAt = new Date();
+            if (isLateOutstationReturn(outpass, actualArrivalAt)) {
+                getOutpassWithStudentById(outpass.id)
+                    .then((fullOutpass) => {
+                        if (!fullOutpass) return;
+                        fullOutpass.actual_arrival = actualArrivalAt;
+                        return notifyLateReturn(fullOutpass, { triggerSource: "CHECK_IN" });
+                    })
+                    .catch((err) =>
+                        console.error("[notifications] Check-in late-return hook failed:", err.message)
+                    );
+            }
 
             return res.status(200).json(
                 new ApiResponse(

@@ -6,6 +6,7 @@ import app from "./src/app.js";
 import { initSchedulers } from "./src/roomallocation/schedulers/index.js";
 import { initEmitter } from "./src/roomallocation/websocket/emitter.js";
 import redisClient from "./src/config/redis.js";
+import { startLateReturnScheduler } from "./src/notifications/index.js";
 
 const PORT = process.env.PORT || 4000;
 
@@ -32,5 +33,10 @@ app.listen(PORT, async () => {
         console.log("Schedulers initialized successfully.");
     } catch (err) {
         console.error("Failed to initialize schedulers:", err);
+    }
+    try {
+        startLateReturnScheduler();
+    } catch (err) {
+        console.error("Failed to start late-return notification scheduler:", err);
     }
 });
