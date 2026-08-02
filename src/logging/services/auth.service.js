@@ -6,7 +6,7 @@ import { mapActorType } from '../../utils/actorType.js';
  * Safe fire-and-forget logic: catches errors internally.
  */
 export async function logAuthentication({
-  actorId,
+  actorId = null,
   actorType,
   action,
   success,
@@ -15,7 +15,6 @@ export async function logAuthentication({
   eventName = null,
   endpoint = null,
   status = null,
-  sessionId = null,
   userEmail = null,
   role = null,
   details = null,
@@ -23,12 +22,12 @@ export async function logAuthentication({
   try {
     const normalizedActorType = mapActorType(actorType);
 
-    if (!actorId || !normalizedActorType || !action) {
+    if (!normalizedActorType || !action) {
       console.warn('[Logging/AuthService] Missing required parameters for logAuthentication', { actorId, actorType, action });
       return null;
     }
     return await authRepo.insertAuthLog({
-      actorId,
+      actorId: actorId || null,
       actorType: normalizedActorType,
       action,
       success: Boolean(success),
@@ -37,7 +36,6 @@ export async function logAuthentication({
       eventName,
       endpoint,
       status,
-      sessionId,
       userEmail,
       role,
       details,

@@ -379,7 +379,6 @@ router.post('/login', async (req, res) => {
             eventName: 'LOGIN_SUCCESS',
             endpoint: req.originalUrl,
             status: 200,
-            sessionId: session?.id,
             userEmail: user.email,
             role,
             details: location || undefined,
@@ -423,6 +422,18 @@ const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
     const result = verifyOtp(email, otp);
 
     if (!result || !result.valid) {
+        await logAuthentication({
+            actorId: null,
+            actorType: mapActorType('student'),
+            action: 'SIGN_UP',
+            success: false,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'INVALID_OTP',
+            endpoint: req.originalUrl,
+            status: 400,
+            userEmail: email,
+        });
         return res.status(400).json({
             success: false,
             message: 'Invalid or expired OTP'
@@ -553,7 +564,6 @@ const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
             eventName: 'OTP_VERIFIED',
             endpoint: req.originalUrl,
             status: 200,
-            sessionId: session?.id,
             userEmail: userObj.email,
             role,
             details: location || undefined,
@@ -1049,7 +1059,6 @@ router.post('/refresh', async (req, res) => {
             status: 200,
             userEmail: decoded.email,
             role: decoded.role,
-            sessionId: updatedSession?.id,
         });
 
         return res.status(200).json({
