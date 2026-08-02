@@ -496,7 +496,8 @@ ALTER TABLE user_session
     ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE,
     ADD COLUMN IF NOT EXISTS city VARCHAR(100),
     ADD COLUMN IF NOT EXISTS state VARCHAR(100),
-    ADD COLUMN IF NOT EXISTS country VARCHAR(100);
+    ADD COLUMN IF NOT EXISTS country VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS machine_id VARCHAR(255);
 
 CREATE INDEX IF NOT EXISTS idx_user_session_actor_active
 ON user_session(actor_id, actor_type, is_active);
@@ -509,6 +510,9 @@ ON user_session(login_time);
 
 CREATE INDEX IF NOT EXISTS idx_session_logout
 ON user_session(logout_time);
+
+CREATE INDEX IF NOT EXISTS idx_session_machine
+ON user_session(actor_id, actor_type, machine_id);
 
 
 

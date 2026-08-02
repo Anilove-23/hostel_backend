@@ -4,7 +4,7 @@ import { mapActorType } from '../../utils/actorType.js';
 /**
  * Create a new user session entry.
  */
-export async function createSession({ actorId, actorType, ipAddress, userAgent, role = null, refreshTokenHash = null, refreshExpiresAt = null, isActive = true }) {
+export async function createSession({ actorId, actorType, ipAddress, userAgent, role = null, refreshTokenHash = null, refreshExpiresAt = null, isActive = true, machineId = null, }) {
   const normalizedActorType = mapActorType(actorType);
   const query = `
     INSERT INTO user_session (
@@ -15,12 +15,13 @@ export async function createSession({ actorId, actorType, ipAddress, userAgent, 
       role,
       refresh_token_hash,
       refresh_expires_at,
-      is_active
+      is_active,
+      machine_id
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING *;
   `;
-  const values = [actorId, normalizedActorType, ipAddress, userAgent, role, refreshTokenHash, refreshExpiresAt, Boolean(isActive)];
+  const values = [actorId, normalizedActorType, ipAddress, userAgent, role, refreshTokenHash, refreshExpiresAt, Boolean(isActive), machineId];
   const result = await pool.query(query, values);
   return result.rows[0];
 }
@@ -67,6 +68,31 @@ export async function findActiveSession({ actorId, actorType }) {
   const result = await pool.query(query, [actorId, normalizedActorType]);
   return result.rows[0] || null;
 }
+export async function findActiveSessionByMachine({
+  actorId,
+  actorType,
+  machineId,
+}) {
+  const normalizedActorType = mapActorType(actorType);
+
+  const query = `
+    SELECT *
+    FROM user_session
+    WHERE actor_id = $1
+      AND actor_type = $2
+      AND machine_id = $3
+      AND is_active = TRUE
+    LIMIT 1;
+  `;
+
+  const result = await pool.query(query, [
+    actorId,
+    normalizedActorType,
+    machineId,
+  ]);
+
+  return result.rows[0] || null;
+}
 
 export async function findSessionById(sessionId) {
   const query = `
@@ -89,6 +115,38 @@ export async function updateSessionRefresh(sessionId, { refreshTokenHash, refres
   `;
   const values = [refreshTokenHash, refreshExpiresAt, Boolean(isActive), sessionId];
   const result = await pool.query(query, values);
+  return result.rows[0] || null;
+}
+export async function updateGuardSession(
+  sessionId,
+  {
+    ipAddress,
+    userAgent,
+    refreshTokenHash,
+    refreshExpiresAt,
+  }
+) {
+  const query = `
+    UPDATE user_session
+    SET
+      login_time = CURRENT_TIMESTAMP,
+      ip_address = $1,
+      user_agent = $2,
+      refresh_token_hash = $3,
+      refresh_expires_at = $4,
+      is_active = TRUE
+    WHERE id = $5
+    RETURNING *;
+  `;
+
+  const result = await pool.query(query, [
+    ipAddress,
+    userAgent,
+    refreshTokenHash,
+    refreshExpiresAt,
+    sessionId,
+  ]);
+
   return result.rows[0] || null;
 }
 
