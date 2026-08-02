@@ -18,6 +18,7 @@ import importRoutes from "./imports/import.routes.js";
 
 import outpassRoutes from "./routes/outpass.routes.js";
 import studentRoutes from "./routes/student.routes.js";
+import chiefWardenRoutes from "./routes/chiefWarden.routes.js";
 
 // Working Routes
 import authRoutes from "../working-routes/auth.js";
@@ -151,6 +152,7 @@ app.use("/api/allocation", allocationRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/admin", eventRoutes);  // Year-based allocation event management
 app.use("/api/warden", wardenRoutes);
+app.use("/api/chief-warden", chiefWardenRoutes);
 
 // Import Routes
 app.use("/api/import", importRoutes);
