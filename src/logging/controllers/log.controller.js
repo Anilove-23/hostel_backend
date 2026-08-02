@@ -5,6 +5,7 @@ import * as authService from '../services/auth.service.js';
 import * as sessionService from '../services/session.service.js';
 import * as activityService from '../services/activity.service.js';
 import * as auditService from '../services/audit.service.js';
+import * as visitService from '../services/visit.service.js';
 
 /*
 =================================================
@@ -86,25 +87,25 @@ export const getSessions = asyncHandler(async (req, res) => {
 /*
 =================================================
 GET STUDENT ACTIVITY LOGS
-GET /api/logs/activity/:studentId
+GET /api/logs/activity
 =================================================
 */
 export const getStudentActivities = asyncHandler(async (req, res) => {
-  const studentId = parseInt(req.params.studentId || req.query.student_id, 10);
-  if (!studentId) {
-    throw new ApiError(400, 'Student ID is required');
-  }
-
   const page = parseInt(req.query.page, 10) || 1;
   const limit = Math.min(parseInt(req.query.limit, 10) || 10, 100);
   const offset = (page - 1) * limit;
 
-  const { action, entity_type } = req.query;
+  const { student_id, studentId, action, entity_type, hostel, search, from, to } = req.query;
+  const resolvedStudentId = studentId || student_id;
 
   const result = await activityService.getStudentActivities({
-    studentId,
+    studentId: resolvedStudentId ? parseInt(resolvedStudentId, 10) : undefined,
     action,
     entityType: entity_type,
+    hostel,
+    search,
+    from,
+    to,
     limit,
     offset,
   });
@@ -128,6 +129,45 @@ export const getStudentActivities = asyncHandler(async (req, res) => {
 
 /*
 =================================================
+GET GATE VISIT LOGS
+GET /api/logs/visits
+=================================================
+*/
+export const getVisits = asyncHandler(async (req, res) => {
+  const page = parseInt(req.query.page, 10) || 1;
+  const limit = Math.min(parseInt(req.query.limit, 10) || 10, 100);
+  const offset = (page - 1) * limit;
+
+  const { hostel, search, from, to } = req.query;
+
+  const result = await visitService.getVisits({
+    hostel,
+    search,
+    from,
+    to,
+    limit,
+    offset,
+  });
+
+  return res.status(200).json(
+    new ApiResponse(
+      200,
+      {
+        visits: result.visits,
+        pagination: {
+          page,
+          limit,
+          total: result.total,
+          totalPages: Math.ceil(result.total / limit),
+        },
+      },
+      'Gate visit logs fetched successfully'
+    )
+  );
+});
+
+/*
+=================================================
 GET ADMIN AUDIT LOGS
 GET /api/logs/audit
 =================================================
@@ -137,7 +177,7 @@ export const getAdminAudits = asyncHandler(async (req, res) => {
   const limit = Math.min(parseInt(req.query.limit, 10) || 10, 100);
   const offset = (page - 1) * limit;
 
-  const { staff_id, actor_role, table_name, action, record_id } = req.query;
+  const { staff_id, actor_role, table_name, action, record_id, hostel, search, from, to } = req.query;
 
   const result = await auditService.getAdminAudits({
     staffId: staff_id ? parseInt(staff_id, 10) : undefined,
@@ -145,6 +185,10 @@ export const getAdminAudits = asyncHandler(async (req, res) => {
     tableName: table_name,
     action,
     recordId: record_id,
+    hostel,
+    search,
+    from,
+    to,
     limit,
     offset,
   });
