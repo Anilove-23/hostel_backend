@@ -1,15 +1,69 @@
 import pool from '../../db/pool.js';
 
+async function ensureAuthLogColumns() {
+  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS event_name VARCHAR(100);`);
+  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS endpoint VARCHAR(255);`);
+  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS status INTEGER;`);
+  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS session_id UUID;`);
+  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);`);
+  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS role VARCHAR(50);`);
+  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS details JSONB;`);
+}
+
 /**
  * Insert a new entry into auth_log table.
  */
-export async function insertAuthLog({ actorId, actorType, action, success, ipAddress, userAgent }) {
+export async function insertAuthLog({
+  actorId,
+  actorType,
+  action,
+  success,
+  ipAddress,
+  userAgent,
+  eventName = null,
+  endpoint = null,
+  status = null,
+  sessionId = null,
+  userEmail = null,
+  role = null,
+  details = null,
+}) {
+  await ensureAuthLogColumns();
+
   const query = `
-    INSERT INTO auth_log (actor_id, actor_type, action, success, ip_address, user_agent)
-    VALUES ($1, $2, $3, $4, $5, $6)
+    INSERT INTO auth_log (
+      actor_id,
+      actor_type,
+      action,
+      success,
+      ip_address,
+      user_agent,
+      event_name,
+      endpoint,
+      status,
+      session_id,
+      user_email,
+      role,
+      details
+    )
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
     RETURNING *;
   `;
-  const values = [actorId, actorType, action, success, ipAddress, userAgent];
+  const values = [
+    actorId,
+    actorType,
+    action,
+    success,
+    ipAddress,
+    userAgent,
+    eventName,
+    endpoint,
+    status,
+    sessionId,
+    userEmail,
+    role,
+    details ? JSON.stringify(details) : null,
+  ];
   const result = await pool.query(query, values);
   return result.rows[0];
 }

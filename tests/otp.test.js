@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { generateOtp, storeOtp, verifyOtp, clearOtpStore } from '../src/utils/otp.js';
+import { getRefreshTokenExpiry } from '../src/utils/authHelpers.js';
 
 test('generateOtp returns a 6-digit code', () => {
   const otp = generateOtp();
@@ -34,4 +35,8 @@ test('verifyOtp rejects an expired or wrong code', () => {
   storeOtp(email, otp, 'student', user, 0);
 
   assert.equal(verifyOtp(email, '000000'), null);
+});
+
+test('guard refresh tokens use a longer expiry than regular users', () => {
+  assert.ok(getRefreshTokenExpiry('guard') > getRefreshTokenExpiry('student'));
 });
