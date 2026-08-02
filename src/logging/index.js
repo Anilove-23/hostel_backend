@@ -10,6 +10,7 @@ export { logAuthentication, getAuthLogs } from './services/auth.service.js';
 export { startSession, endSession, getSessions } from './services/session.service.js';
 export { logStudentActivity, getStudentActivities } from './services/activity.service.js';
 export { logAdminAudit, getAdminAudits } from './services/audit.service.js';
+export { getVisits } from './services/visit.service.js';
 
 // Enums / Constants
 export {

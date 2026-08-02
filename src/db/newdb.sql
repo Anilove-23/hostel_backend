@@ -432,22 +432,38 @@ CREATE TYPE audit_action_enum AS ENUM (
 -- =========================================================
 
 CREATE TABLE auth_log (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
 
-    actor_id INTEGER NOT NULL,
-    actor_type auth_actor_enum NOT NULL,
+    actor_id    INTEGER, -- Nullable for failed attempts where user doesn't exist
+    actor_type  auth_actor_enum NOT NULL,
 
-    action auth_action_enum NOT NULL,
+    action      auth_action_enum NOT NULL,
 
-    -- true = successful authentication
-    -- false = failed login/signup attempt
-    success BOOLEAN NOT NULL,
+    -- true = successful authentication, false = failed attempt
+    success     BOOLEAN NOT NULL,
 
-    ip_address INET,
-    user_agent TEXT,
+    ip_address  INET,
+    user_agent  TEXT,
 
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+    event_name  VARCHAR(100),
+    endpoint    VARCHAR(255),
+    status      INTEGER,
+    user_email  VARCHAR(255),
+    role        VARCHAR(50),
+    details     JSONB,
+
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
 );
+
+ALTER TABLE auth_log
+    ALTER COLUMN actor_id DROP NOT NULL,
+    DROP COLUMN IF EXISTS session_id,
+    ADD COLUMN IF NOT EXISTS event_name VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS endpoint VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS status INTEGER,
+    ADD COLUMN IF NOT EXISTS user_email VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS role VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS details JSONB;
 
 -- ===========================
 -- Indexes
@@ -461,6 +477,9 @@ ON auth_log(action);
 
 CREATE INDEX idx_auth_success
 ON auth_log(success);
+
+CREATE INDEX idx_auth_email
+ON auth_log(user_email);
 
 CREATE INDEX idx_auth_created
 ON auth_log(created_at);

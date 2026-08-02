@@ -497,6 +497,22 @@ const refreshExpiresAt = new Date(
                 role,
                 otp: process.env.NODE_ENV !== 'production' ? otp : undefined
             });
+        await logAuthentication({
+            actorId: user.id,
+            actorType: mapActorType(role),
+            action: 'SIGN_IN',
+            success: true,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'LOGIN_SUCCESS',
+            endpoint: req.originalUrl,
+            status: 200,
+            userEmail: user.email,
+            role,
+            details: location || undefined,
+        });
+        if (location) {
+            await pool.query(`UPDATE user_session SET city = $1, state = $2, country = $3 WHERE id = $4`, [location.city, location.state, location.country, session?.id]);
         }
 
         return createAuthenticatedSessionResponse(req, res, {
@@ -531,6 +547,18 @@ const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
     const result = verifyOtp(email, otp);
 
     if (!result || !result.valid) {
+        await logAuthentication({
+            actorId: null,
+            actorType: mapActorType('student'),
+            action: 'SIGN_UP',
+            success: false,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'INVALID_OTP',
+            endpoint: req.originalUrl,
+            status: 400,
+            userEmail: email,
+        });
         return res.status(400).json({
             success: false,
             message: 'Invalid or expired OTP'
@@ -662,7 +690,6 @@ const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
             eventName: 'OTP_VERIFIED',
             endpoint: req.originalUrl,
             status: 200,
-            sessionId: session?.id,
             userEmail: userObj.email,
             role,
             details: location || undefined,
@@ -1212,7 +1239,6 @@ router.post('/refresh', async (req, res) => {
             status: 200,
             userEmail: decoded.email,
             role: decoded.role,
-            sessionId: updatedSession?.id,
         });
 
         return res.status(200).json({
