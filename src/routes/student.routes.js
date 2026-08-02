@@ -11,7 +11,9 @@ import {
     getOutpassDetails,
     getStudentHistory,
     assignAttendent,
-    bulkRecordEntry
+    bulkRecordEntry,
+    getOutpassCutoff,
+    updateOutpassCutoff
 } from "../controllers/student.controller.js";
 import pool from "../db/pool.js";
 
@@ -151,6 +153,8 @@ router.post(
 );
 router.post(
     "/assign-attendent",
+    auth,
+    authorizeRoles("warden","chief-warden"),
     assignAttendent
 );
 /*
@@ -178,7 +182,22 @@ router.get(
 router.post(
     "/bulk-record-entry",
     auth,
+    authorizeRoles("warden" ,"chief-warden","guard","attendent"),
     bulkRecordEntry
+);
+
+router.get(
+    "/outpass-cutoff",
+    auth,
+    authorizeRoles("warden"),
+    getOutpassCutoff
+);
+
+router.patch(
+    "/outpass-cutoff",
+    auth,
+    authorizeRoles("warden"),
+    updateOutpassCutoff
 );
 
 export default router;
