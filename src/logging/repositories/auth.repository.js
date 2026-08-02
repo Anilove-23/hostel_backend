@@ -1,20 +1,27 @@
 import pool from '../../db/pool.js';
 
-async function ensureAuthLogColumns() {
-  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS event_name VARCHAR(100);`);
-  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS endpoint VARCHAR(255);`);
-  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS status INTEGER;`);
-  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS session_id UUID;`);
-  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS user_email VARCHAR(255);`);
-  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS role VARCHAR(50);`);
-  await pool.query(`ALTER TABLE auth_log ADD COLUMN IF NOT EXISTS details JSONB;`);
+/**
+ * Sanitize details object to prevent logging sensitive credentials or session tokens.
+ */
+function sanitizeDetails(details) {
+  if (!details || typeof details !== 'object') return null;
+  const sanitized = { ...details };
+  delete sanitized.refreshToken;
+  delete sanitized.refresh_token;
+  delete sanitized.token;
+  delete sanitized.password;
+  delete sanitized.password_hash;
+  delete sanitized.secret;
+  delete sanitized.sessionId;
+  delete sanitized.session_id;
+  return Object.keys(sanitized).length > 0 ? JSON.stringify(sanitized) : null;
 }
 
 /**
- * Insert a new entry into auth_log table.
+ * Insert a new entry into auth_log table (omitting session_id for security).
  */
 export async function insertAuthLog({
-  actorId,
+  actorId = null,
   actorType,
   action,
   success,
@@ -23,13 +30,10 @@ export async function insertAuthLog({
   eventName = null,
   endpoint = null,
   status = null,
-  sessionId = null,
   userEmail = null,
   role = null,
   details = null,
 }) {
-  await ensureAuthLogColumns();
-
   const query = `
     INSERT INTO auth_log (
       actor_id,
@@ -41,28 +45,26 @@ export async function insertAuthLog({
       event_name,
       endpoint,
       status,
-      session_id,
       user_email,
       role,
       details
     )
-    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
     RETURNING *;
   `;
   const values = [
-    actorId,
+    actorId || null,
     actorType,
     action,
-    success,
-    ipAddress,
-    userAgent,
-    eventName,
-    endpoint,
-    status,
-    sessionId,
-    userEmail,
-    role,
-    details ? JSON.stringify(details) : null,
+    Boolean(success),
+    ipAddress || null,
+    userAgent || null,
+    eventName || null,
+    endpoint || null,
+    status || null,
+    userEmail || null,
+    role || null,
+    sanitizeDetails(details),
   ];
   const result = await pool.query(query, values);
   return result.rows[0];
@@ -71,7 +73,7 @@ export async function insertAuthLog({
 /**
  * Find auth logs with optional filters and pagination.
  */
-export async function findAuthLogs({ actorId, actorType, action, success, limit = 10, offset = 0 }) {
+export async function findAuthLogs({ actorId, actorType, action, success, search, from, to, limit = 10, offset = 0 } = {}) {
   const conditions = [];
   const values = [];
 
@@ -90,6 +92,27 @@ export async function findAuthLogs({ actorId, actorType, action, success, limit 
   if (success !== undefined && success !== null) {
     values.push(success);
     conditions.push(`success = $${values.length}`);
+  }
+
+  if (search && search.trim()) {
+    values.push(`%${search.trim().toLowerCase()}%`);
+    const idx = values.length;
+    conditions.push(`(
+      LOWER(COALESCE(user_email, '')) LIKE $${idx} OR
+      LOWER(COALESCE(event_name, '')) LIKE $${idx} OR
+      LOWER(COALESCE(role, '')) LIKE $${idx} OR
+      LOWER(CAST(action AS TEXT)) LIKE $${idx}
+    )`);
+  }
+
+  if (from) {
+    values.push(from);
+    conditions.push(`created_at >= $${values.length}`);
+  }
+
+  if (to) {
+    values.push(to);
+    conditions.push(`created_at <= $${values.length}`);
   }
 
   const whereClause = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
@@ -113,6 +136,6 @@ export async function findAuthLogs({ actorId, actorType, action, success, limit 
 
   return {
     logs: dataResult.rows,
-    total: parseInt(countResult.rows[0].total, 10),
+    total: parseInt(countResult.rows[0]?.total || 0, 10),
   };
 }
