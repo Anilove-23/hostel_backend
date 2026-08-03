@@ -4,7 +4,7 @@ import { mapActorType } from '../../utils/actorType.js';
 /**
  * Start a user session.
  */
-export async function startSession({ actorId, actorType, ipAddress, userAgent, role = null, refreshTokenHash = null, refreshExpiresAt = null, isActive = true }) {
+export async function startSession({ actorId, actorType, ipAddress, userAgent, role = null, refreshTokenHash = null, refreshExpiresAt = null, isActive = true, machineId = null }) {
   try {
     const normalizedActorType = mapActorType(actorType);
 
@@ -21,6 +21,7 @@ export async function startSession({ actorId, actorType, ipAddress, userAgent, r
       refreshTokenHash,
       refreshExpiresAt,
       isActive,
+      machineId,
     });
   } catch (error) {
     console.error('[Logging/SessionService] Failed to start session:', error.message);
@@ -75,6 +76,26 @@ export async function getActiveSession(params = {}) {
     return null;
   }
 }
+export async function getActiveSessionByMachine(params = {}) {
+  try {
+    const normalizedParams = {
+      ...params,
+      actorType: params.actorType
+        ? mapActorType(params.actorType)
+        : params.actorType,
+    };
+
+    return await sessionRepo.findActiveSessionByMachine(
+      normalizedParams
+    );
+  } catch (error) {
+    console.error(
+      "[Logging/SessionService] Failed to fetch machine session:",
+      error.message
+    );
+    return null;
+  }
+}
 
 export async function getSessionById(sessionId) {
   try {
@@ -93,7 +114,23 @@ export async function rotateSessionRefresh(sessionId, params = {}) {
     return null;
   }
 }
-
+export async function updateGuardSession(
+  sessionId,
+  params = {}
+) {
+  try {
+    return await sessionRepo.updateGuardSession(
+      sessionId,
+      params
+    );
+  } catch (error) {
+    console.error(
+      "[Logging/SessionService] Failed to update guard session:",
+      error.message
+    );
+    return null;
+  }
+}
 /**
  * Fetch user sessions based on filters.
  */

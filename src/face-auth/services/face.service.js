@@ -3,7 +3,7 @@
 import { randomUUID } from "crypto";
 
 import pool from "../../db/pool.js";
-import ApiError from "../../utils/ApiError.js";
+import ApiError from "../../utils/apiError.js";
 
 import zepirisService from "./zepiris.service.js";
 

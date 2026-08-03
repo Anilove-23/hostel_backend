@@ -1,7 +1,7 @@
 import asyncHandler from "../utils/asyncHandler.js";
 import pool from "../db/pool.js";
-import ApiError from "../utils/ApiError.js";
-import ApiResponse from "../utils/ApiResponse.js";
+import ApiError from "../utils/apiError.js";
+import ApiResponse from "../utils/apiResponse.js";
 import { logStudentActivity, StudentAction } from "../logging/index.js";
 import { getOutpassWithStudentById } from "../notifications/repositories/lateReturn.repository.js";
 import { notifyLateReturn, isLateOutstationReturn } from "../notifications/services/lateReturn.service.js";

@@ -7,7 +7,8 @@ import dotenv from 'dotenv';
 import { generateOtp, storeOtp, verifyOtp } from '../src/utils/otp.js';
 import { getClientIp, getRefreshTokenExpiry, hashRefreshToken, compareRefreshTokens, lookupLocationFromIp } from '../src/utils/authHelpers.js';
 import { logAuthentication } from '../src/logging/services/auth.service.js';
-import { startSession, deactivateSessions, rotateSessionRefresh, endSession, getActiveSession } from '../src/logging/services/session.service.js';
+import { startSession, deactivateSessions, rotateSessionRefresh, endSession, getActiveSession, getActiveSessionByMachine,
+    updateGuardSession } from '../src/logging/services/session.service.js';
 import { mapActorType } from '../src/utils/actorType.js';
 
 const DEPARTMENT_PREFIXES = {
@@ -138,7 +139,7 @@ const inferRoleFromEmail = (email) => {
     const normalizedEmail = String(email || '').trim().toLowerCase();
 
     if (!normalizedEmail) return 'student';
-    if (normalizedEmail.includes('attendant')) return 'attendant';
+    if (normalizedEmail.includes('attendant') || normalizedEmail.includes('att_')) return 'attendant';
     if (normalizedEmail.includes('chief')) return 'chief-warden';
     if (normalizedEmail.includes('guard')) return 'guard';
     if (normalizedEmail.includes('warden')) return 'warden';
@@ -152,6 +153,103 @@ const ROLE_TABLES = {
     guard: 'guard',
     warden: 'admin',
     'chief-warden': 'admin'
+};
+
+const OTP_ENABLED_ROLES = new Set(['student', 'attendant', 'warden', 'chief-warden']);
+
+const createAuthenticatedSessionResponse = async (req, res, { user, role, clientIp, userAgent,  machineId = null,existingSession = null, refreshToken = null,
+        refreshTokenHash = null,
+        refreshExpiresAt = null }) => {
+    if (!refreshToken) {
+        refreshToken = jwt.sign(
+            { sub: user.id, role },
+            process.env.JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+    }
+    refreshTokenHash = await hashRefreshToken(refreshToken);
+    refreshExpiresAt = new Date(Date.now() + getRefreshTokenExpiry(role));
+    const location = await lookupLocationFromIp(clientIp);
+
+    if (role !== 'guard') {
+        await deactivateSessions({
+            actorId: user.id,
+            actorType: mapActorType(role)
+        });
+    }
+
+    await logAuthentication({
+        actorId: user.id,
+        actorType: mapActorType(role),
+        action: 'SIGN_IN',
+        success: true,
+        ipAddress: clientIp,
+        userAgent,
+        eventName: 'SESSION_REVOKED',
+        endpoint: req.originalUrl,
+        status: 200,
+        userEmail: user.email,
+        role,
+    });
+
+    let session;
+
+if (existingSession) {
+    session = existingSession;
+} else {
+    session = await startSession({
+        actorId: user.id,
+        actorType: mapActorType(role),
+        ipAddress: clientIp,
+        userAgent,
+        role,
+        refreshTokenHash,
+        refreshExpiresAt,
+        isActive: true,
+        machineId:
+            role === 'guard'
+                ? req.headers['x-machine-id']
+                : null
+    });
+}
+
+    const token = generateToken({
+        id: user.id,
+        email: user.email,
+        role,
+        authority_level: user.authority_level,
+        sessionId: session?.id,
+    });
+
+    await logAuthentication({
+        actorId: user.id,
+        actorType: mapActorType(role),
+        action: 'SIGN_IN',
+        success: true,
+        ipAddress: clientIp,
+        userAgent,
+        eventName: 'LOGIN_SUCCESS',
+        endpoint: req.originalUrl,
+        status: 200,
+        sessionId: session?.id,
+        userEmail: user.email,
+        role,
+        details: location || undefined,
+    });
+
+    if (location && session?.id) {
+        await pool.query(`UPDATE user_session SET city = $1, state = $2, country = $3 WHERE id = $4`, [location.city, location.state, location.country, session.id]);
+    }
+
+    return res.status(200).json({
+        success: true,
+        message: 'Login successful',
+        token,
+        refreshToken,
+        user,
+        role,
+        sessionId: session?.id
+    });
 };
 
 // ======================================================
@@ -199,7 +297,7 @@ router.get('/login', (req, res) => {
 
 
 // ======================================================
-// LOGIN (Direct JWT - No OTP)
+// LOGIN (OTP for eligible roles, direct JWT for Guard)
 // ======================================================
 
 router.post('/login', async (req, res) => {
@@ -294,11 +392,51 @@ router.post('/login', async (req, res) => {
         const normalizedMachineId = typeof machineId === 'string' ? machineId.trim() : '';
 
         if (role === 'guard') {
+            
+
             if (!normalizedMachineId) {
                 return res.status(400).json({
                     message: 'Machine ID header (X-Machine-ID) is required for Guard login.'
                 });
             }
+            const refreshToken = jwt.sign(
+    { sub: user.id, role },
+    process.env.JWT_SECRET,
+    { expiresIn: "7d" }
+);
+
+const refreshTokenHash = await hashRefreshToken(refreshToken);
+
+const refreshExpiresAt = new Date(
+    Date.now() + getRefreshTokenExpiry(role)
+);
+            const existingSession = await getActiveSessionByMachine({
+        actorId: user.id,
+        actorType: role,
+        machineId: normalizedMachineId
+    });
+
+
+    if (existingSession) {
+
+        return updateGuardSession(
+            existingSession.id,
+            {
+                ipAddress: clientIp,
+                userAgent,
+                refreshTokenHash,
+                refreshExpiresAt
+            }
+        ).then(() =>
+            createAuthenticatedSessionResponse(req, res, {
+                user,
+                role,
+                clientIp,
+                userAgent,
+                existingSession
+            })
+        );
+    }
 
             const guardRecordResult = await pool.query(
                 `SELECT authorized_machine_1, authorized_machine_2 FROM guard WHERE id = $1 LIMIT 1`,
@@ -325,50 +463,41 @@ router.post('/login', async (req, res) => {
                     [normalizedMachineId, user.id]
                 );
             }
+
+            return createAuthenticatedSessionResponse(req, res, {
+                user,
+                role,
+                clientIp,
+                userAgent,
+            });
         }
 
-        const refreshToken = jwt.sign({ sub: user.id, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
-        const refreshTokenHash = await hashRefreshToken(refreshToken);
-        const refreshExpiresAt = new Date(Date.now() + getRefreshTokenExpiry(role));
-        const location = await lookupLocationFromIp(clientIp);
+        if (OTP_ENABLED_ROLES.has(role)) {
+            const otp = generateOtp();
+            storeOtp(email, otp, role, user);
 
-        if (role !== 'guard') {
-    await deactivateSessions({
-        actorId: user.id,
-        actorType: mapActorType(role)
-    })};
-        await logAuthentication({
-            actorId: user.id,
-            actorType: mapActorType(role),
-            action: 'SIGN_IN',
-            success: true,
-            ipAddress: clientIp,
-            userAgent,
-            eventName: 'SESSION_REVOKED',
-            endpoint: req.originalUrl,
-            status: 200,
-            userEmail: user.email,
-            role,
-        });
-        const session = await startSession({
-            actorId: user.id,
-            actorType: mapActorType(role),
-            ipAddress: clientIp,
-            userAgent,
-            role,
-            refreshTokenHash,
-            refreshExpiresAt,
-            isActive: true,
-        });
+            await logAuthentication({
+                actorId: user.id,
+                actorType: mapActorType(role),
+                action: 'SIGN_IN',
+                success: true,
+                ipAddress: clientIp,
+                userAgent,
+                eventName: 'OTP_SENT',
+                endpoint: req.originalUrl,
+                status: 200,
+                userEmail: user.email,
+                role,
+            });
 
-        const token = generateToken({
-            id: user.id,
-            email: user.email,
-            role,
-            authority_level: user.authority_level,
-            sessionId: session?.id,
-        });
-
+            return res.status(200).json({
+                success: true,
+                message: 'OTP generated',
+                email,
+                role,
+                otp: process.env.NODE_ENV !== 'production' ? otp : undefined
+            });
+        }
         await logAuthentication({
             actorId: user.id,
             actorType: mapActorType(role),
@@ -387,14 +516,11 @@ router.post('/login', async (req, res) => {
             await pool.query(`UPDATE user_session SET city = $1, state = $2, country = $3 WHERE id = $4`, [location.city, location.state, location.country, session?.id]);
         }
 
-        return res.status(200).json({
-            success: true,
-            message: 'Login successful',
-            token,
-            refreshToken,
+        return createAuthenticatedSessionResponse(req, res, {
             user,
             role,
-            sessionId: session?.id
+            clientIp,
+            userAgent,
         });
 
     } catch (err) {
@@ -530,6 +656,7 @@ const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
             refreshTokenHash,
             refreshExpiresAt,
             isActive: true,
+        
         });
 
         const token = generateToken({
@@ -591,6 +718,60 @@ const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
         });
     }
 };
+
+router.post('/verify-login-otp', async (req, res) => {
+    const { email, otp, role: requestedRole } = req.body || {};
+    const clientIp = getClientIp(req);
+    const userAgent = req.get('user-agent') || '';
+
+    if (!email || !otp) {
+        return res.status(400).json({
+            success: false,
+            message: 'Email and OTP are required'
+        });
+    }
+
+    const result = verifyOtp(email, otp);
+
+    if (!result || !result.valid) {
+        await logAuthentication({
+            actorId: null,
+            actorType: mapActorType(requestedRole || inferRoleFromEmail(email) || 'student'),
+            action: 'SIGN_IN',
+            success: false,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'OTP_FAILED',
+            endpoint: req.originalUrl,
+            status: 401,
+            userEmail: email,
+            role: requestedRole || inferRoleFromEmail(email) || 'student',
+        });
+
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid or expired OTP'
+        });
+    }
+
+    const payload = result.payload;
+    const role = payload.role || requestedRole || inferRoleFromEmail(email) || 'student';
+    const user = payload.user || payload;
+
+    if (!user?.id) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid OTP payload'
+        });
+    }
+
+    return createAuthenticatedSessionResponse(req, res, {
+        user,
+        role,
+        clientIp,
+        userAgent,
+    });
+});
 
 router.post('/verify-otp', async (req, res) => {
     const clientIp = getClientIp(req);

@@ -24,6 +24,7 @@ import chiefWardenRoutes from "./routes/chiefWarden.routes.js";
 import authRoutes from "../working-routes/auth.js";
 import complaintRoutes from "../working-routes/complaint.js";
 import outpassRoutesWorking from "../working-routes/outpass.js";
+import dayScholarRoutes from "../working-routes/day_scholar.js";
 
 // === NEW: Our Custom Warden Room Management Routes ===
 import wardenRoomRoutes from "./routes/roomRoutes.js";
@@ -124,6 +125,7 @@ app.use("/api/auth", authRoutes);
 // Working Routes
 app.use("/complaint", complaintRoutes);
 app.use("/outpass", outpassRoutesWorking);
+app.use("/api/v1/dayscholar", dayScholarRoutes);
 
 // Outpass Routes
 app.use("/api/outpasses", outpassRoutes);
