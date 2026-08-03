@@ -178,6 +178,24 @@ router.post("/dev/advance-phase", async (req, res) => {
         const { emit, WS_EVENTS }  = await import("./websocket/emitter.js");
         const { eventId, targetPhase } = req.body;
         await setCurrentPhase(eventId, targetPhase);
+
+        // If forcefully advancing to LIVE_BATCHES, fast-forward the first pending batch so it starts immediately
+        if (targetPhase === 'LIVE_BATCHES') {
+            const db = (await import("../../src/db/pool.js")).default;
+            await db.query(
+                `UPDATE batch 
+                 SET start_time = NOW(), end_time = NOW() + (end_time - start_time) 
+                 WHERE allocation_event_id = $1 AND status = 'PENDING' 
+                   AND batch_number = (
+                       SELECT MIN(batch_number) FROM batch 
+                       WHERE allocation_event_id = $1 AND status = 'PENDING'
+                   )`,
+                [eventId]
+            );
+            const { recoverOnBoot } = await import("./schedulers/batchScheduler.js");
+            await recoverOnBoot();
+        }
+
         emit(WS_EVENTS.PHASE_CHANGED, { eventId, phase: targetPhase }, eventId);
         console.log(`[Backend] Phase manually advanced to ${targetPhase} for event ${eventId}`);
         res.status(200).json({ success: true, message: `Advanced to ${targetPhase}` });

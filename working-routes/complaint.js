@@ -4,6 +4,8 @@ import pool from '../src/db/pool.js';
 
 import auth from '../src/middleware/middleware.js';
 
+import { logStudentActivity, StudentAction } from '../src/logging/index.js';
+
 const router = express.Router();
 
 /* =================================================
@@ -333,8 +335,19 @@ router.post('/postcomplaint', auth, async (req, res) => {
       'INSERT INTO complaint (student_id, title, type, description, hostel) VALUES ($1, $2, $3, $4, $5) RETURNING *',
       [student_id, title, type, description, hostel]
     );
+    
+    const newComplaint = result.rows[0];
 
-    return res.status(200).json({ message: 'Complaint submitted successfully', complaint: result.rows[0] });
+    // Log the activity
+    logStudentActivity({
+        studentId: student_id,
+        action: StudentAction.COMPLAINT_CREATED,
+        entityId: newComplaint.id,
+        entityType: 'complaint',
+        metadata: { title, type }
+    });
+    
+    return res.status(200).json({ message: 'Complaint submitted successfully', complaint: newComplaint });
   } catch (err) {
     console.error("Error in postcomplaint:", err);
     return res.status(500).json({

@@ -365,13 +365,274 @@ CREATE TABLE visit_log (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
     gate VARCHAR(100),
-    exit_guard_id INTEGER REFERENCES guard(id) ON DELETE SET NULL
+    exit_guard_id INTEGER REFERENCES guard(id) ON DELETE SET NULL,
+    entry_guard_id INTEGER REFERENCES attendent(id) ON DELETE SET NULL
+);
+
+CREATE TABLE guard_action_log (
+    id UUID PRIMARY KEY,
+    outpass_id INTEGER NOT NULL REFERENCES outpass(id) ON DELETE CASCADE,
+    action VARCHAR(10) NOT NULL CHECK (action IN ('exit', 'enter')),
+    gate VARCHAR(100) DEFAULT 'Main Gate',
+    remark TEXT,
+    guard_id INTEGER REFERENCES attendent(id) ON DELETE SET NULL,
+    actioned_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    received_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
 );
 
 
 -- =========================================================
--- 6. INDEXES (Optimized for both schemas)
+--  ENUM TYPES FOR LOGGING
 -- =========================================================
+
+CREATE TYPE auth_actor_enum AS ENUM (
+    'STUDENT',
+    'ADMIN',
+    'ATTENDENT',
+    'GUARD'
+);
+
+-- Authentication events only
+CREATE TYPE auth_action_enum AS ENUM (
+    'SIGN_IN',
+    'SIGN_UP',
+    'SIGN_OUT'
+);
+
+-- Student domain events
+CREATE TYPE student_action_enum AS ENUM (
+    'COMPLAINT_CREATED',
+    'OUTPASS_CREATED',
+    'OUTPASS_CANCELLED',
+    'OUTPASS_APPROVED',
+    'OUTPASS_REJECTED',
+    'CAMPUS_EXIT',
+    'CAMPUS_ENTRY'
+);
+
+CREATE TYPE admin_role_enum AS ENUM (
+    'ATTENDENT',
+    'WARDEN',
+    'CHIEF_WARDEN',
+    'SYSTEM_ADMIN'
+);
+
+-- Database modification actions only
+CREATE TYPE audit_action_enum AS ENUM (
+    'CREATE',
+    'UPDATE',
+    'DELETE'
+);
+
+
+
+-- =========================================================
+-- AUTHENTICATION LOGS
+-- Stores every login/logout/signup attempt
+-- =========================================================
+
+CREATE TABLE auth_log (
+    id          UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    actor_id    INTEGER, -- Nullable for failed attempts where user doesn't exist
+    actor_type  auth_actor_enum NOT NULL,
+
+    action      auth_action_enum NOT NULL,
+
+    -- true = successful authentication, false = failed attempt
+    success     BOOLEAN NOT NULL,
+
+    ip_address  INET,
+    user_agent  TEXT,
+
+    event_name  VARCHAR(100),
+    endpoint    VARCHAR(255),
+    status      INTEGER,
+    user_email  VARCHAR(255),
+    role        VARCHAR(50),
+    details     JSONB,
+
+    created_at  TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+ALTER TABLE auth_log
+    ALTER COLUMN actor_id DROP NOT NULL,
+    DROP COLUMN IF EXISTS session_id,
+    ADD COLUMN IF NOT EXISTS event_name VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS endpoint VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS status INTEGER,
+    ADD COLUMN IF NOT EXISTS user_email VARCHAR(255),
+    ADD COLUMN IF NOT EXISTS role VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS details JSONB;
+
+-- ===========================
+-- Indexes
+-- ===========================
+
+CREATE INDEX idx_auth_actor
+ON auth_log(actor_type, actor_id);
+
+CREATE INDEX idx_auth_action
+ON auth_log(action);
+
+CREATE INDEX idx_auth_success
+ON auth_log(success);
+
+CREATE INDEX idx_auth_email
+ON auth_log(user_email);
+
+CREATE INDEX idx_auth_created
+ON auth_log(created_at);
+
+
+
+-- =========================================================
+-- USER SESSION LOG
+-- Tracks complete login sessions
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS user_session (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    actor_id INTEGER NOT NULL,
+    actor_type VARCHAR(50) NOT NULL,
+    role VARCHAR(50),
+    login_time TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    logout_time TIMESTAMP WITH TIME ZONE,
+    ip_address INET,
+    user_agent TEXT,
+    refresh_token_hash TEXT,
+    refresh_expires_at TIMESTAMP WITH TIME ZONE,
+    is_active BOOLEAN DEFAULT TRUE,
+    city VARCHAR(100),
+    state VARCHAR(100),
+    country VARCHAR(100)
+);
+
+ALTER TABLE user_session
+    ADD COLUMN IF NOT EXISTS role VARCHAR(50),
+    ADD COLUMN IF NOT EXISTS refresh_token_hash TEXT,
+    ADD COLUMN IF NOT EXISTS refresh_expires_at TIMESTAMP WITH TIME ZONE,
+    ADD COLUMN IF NOT EXISTS is_active BOOLEAN DEFAULT TRUE,
+    ADD COLUMN IF NOT EXISTS city VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS state VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS country VARCHAR(100),
+    ADD COLUMN IF NOT EXISTS machine_id VARCHAR(255);
+
+CREATE INDEX IF NOT EXISTS idx_user_session_actor_active
+ON user_session(actor_id, actor_type, is_active);
+
+CREATE INDEX IF NOT EXISTS idx_session_actor
+ON user_session(actor_type, actor_id);
+
+CREATE INDEX IF NOT EXISTS idx_session_login
+ON user_session(login_time);
+
+CREATE INDEX IF NOT EXISTS idx_session_logout
+ON user_session(logout_time);
+
+CREATE INDEX IF NOT EXISTS idx_session_machine
+ON user_session(actor_id, actor_type, machine_id);
+
+
+
+-- =========================================================
+-- STUDENT ACTIVITY LOG
+-- =========================================================
+
+CREATE TABLE student_activity_log (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    student_id INTEGER NOT NULL
+        REFERENCES student(id)
+        ON DELETE CASCADE,
+
+    action student_action_enum NOT NULL,
+
+    -- Related entity
+    entity_id INTEGER,
+    entity_type VARCHAR(50),
+
+    -- Flexible event data
+    metadata JSONB,
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+
+
+-- ===========================
+-- Indexes
+-- ===========================
+
+CREATE INDEX idx_student_activity_student
+ON student_activity_log(student_id);
+
+CREATE INDEX idx_student_activity_action
+ON student_activity_log(action);
+
+CREATE INDEX idx_student_activity_entity
+ON student_activity_log(entity_type, entity_id);
+
+CREATE INDEX idx_student_activity_created
+ON student_activity_log(created_at);
+
+CREATE INDEX idx_student_activity_metadata
+ON student_activity_log
+USING GIN(metadata);
+
+
+
+-- =========================================================
+-- ADMIN / STAFF AUDIT LOG
+-- =========================================================
+
+CREATE TABLE admin_audit_log (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+
+    staff_id INTEGER NOT NULL,
+
+    actor_role admin_role_enum NOT NULL,
+
+    action audit_action_enum NOT NULL,
+
+    table_name VARCHAR(100) NOT NULL,
+
+    -- Supports INTEGER, UUID, VARCHAR primary keys
+    record_id VARCHAR(255) NOT NULL,
+
+    old_values JSONB,
+
+    new_values JSONB,
+
+    -- Optional explanation for manual operations
+    reason TEXT,
+
+    ip_address INET,
+
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
+);
+
+
+-- ===========================
+-- Indexes
+-- ===========================
+
+CREATE INDEX idx_admin_staff
+ON admin_audit_log(staff_id, actor_role);
+
+CREATE INDEX idx_admin_table_record
+ON admin_audit_log(table_name, record_id);
+
+CREATE INDEX idx_admin_created
+ON admin_audit_log(created_at);
+
+CREATE INDEX idx_admin_new_values
+ON admin_audit_log
+USING GIN(new_values);
+
+CREATE INDEX idx_admin_old_values
+ON admin_audit_log
+USING GIN(old_values);
 
 -- General Queries
 CREATE INDEX idx_student_hostel    ON student(hostel_id);
@@ -379,6 +640,8 @@ CREATE INDEX idx_outpass_student   ON outpass(student_id);
 CREATE INDEX idx_outpass_status    ON outpass(outp_status);
 CREATE INDEX idx_visit_log_student ON visit_log(student_id);
 CREATE INDEX idx_visit_log_outpass ON visit_log(outpass_id);
+CREATE INDEX idx_gal_outpass       ON guard_action_log(outpass_id);
+CREATE INDEX idx_gal_received      ON guard_action_log(received_at);
 CREATE INDEX idx_complaint_student ON complaint(student_id);
 CREATE INDEX idx_complaint_status  ON complaint(status);
 
@@ -695,13 +958,207 @@ BEGIN
     INSERT INTO room_assignment (
         room_id, student_id, assigned_by, assignment_status
     ) VALUES (
+-- Handle Leader Leaving
+-- -------------------------------------------------
+CREATE OR REPLACE FUNCTION handle_primary_applicant_leave()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_new_primary INTEGER;
+BEGIN
+    IF TG_OP = 'DELETE' OR (TG_OP = 'UPDATE' AND OLD.group_id IS DISTINCT FROM NEW.group_id) THEN
+        IF OLD.group_id IS NOT NULL THEN
+            -- Check if the person leaving was the primary applicant
+            IF EXISTS (
+                SELECT 1 FROM housing_group WHERE id = OLD.group_id AND primary_applicant_id = OLD.id
+            ) THEN
+                -- Find the remaining student with the highest CGPA (lowest rank number)
+                SELECT id
+                INTO v_new_primary
+                FROM student
+                WHERE group_id = OLD.group_id AND id <> OLD.id
+                ORDER BY individual_rank ASC
+                LIMIT 1;
+
+                IF v_new_primary IS NOT NULL THEN
+                    -- Pass leadership to them
+                    UPDATE housing_group
+                    SET primary_applicant_id = v_new_primary
+                    WHERE id = OLD.group_id;
+                ELSE
+                    -- Group is empty, dissolve it
+                    DELETE FROM housing_group
+                    WHERE id = OLD.group_id;
+                END IF;
+            END IF;
+        END IF;
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_handle_primary_applicant
+AFTER UPDATE OF group_id OR DELETE
+ON student
+FOR EACH ROW
+EXECUTE FUNCTION handle_primary_applicant_leave();
+
+-- -------------------------------------------------
+-- Dynamic Snapshot Synchronization
+-- -------------------------------------------------
+CREATE OR REPLACE FUNCTION sync_student_room_snapshot()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_active_room UUID;
+    v_upcoming_room UUID;
+    v_student_id INTEGER;
+BEGIN
+    v_student_id := COALESCE(NEW.student_id, OLD.student_id);
+
+    SELECT room_id INTO v_active_room
+    FROM room_assignment
+    WHERE student_id = v_student_id AND assignment_status = 'ACTIVE'
+    LIMIT 1;
+
+    SELECT room_id INTO v_upcoming_room
+    FROM room_assignment
+    WHERE student_id = v_student_id AND assignment_status = 'UPCOMING'
+    LIMIT 1;
+
+    -- Update the fast-read columns in the student table
+    UPDATE student
+    SET physical_room_id  = v_active_room,
+        allocated_room_id = v_upcoming_room,
+        is_allotted       = (v_active_room IS NOT NULL OR v_upcoming_room IS NOT NULL)
+    WHERE id = v_student_id;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_sync_student_room
+AFTER INSERT OR UPDATE OF assignment_status OR DELETE
+ON room_assignment
+FOR EACH ROW
+EXECUTE FUNCTION sync_student_room_snapshot();
+
+-- -------------------------------------------------
+-- Room Occupancy Recalculation
+-- -------------------------------------------------
+CREATE OR REPLACE FUNCTION recalculate_room_occupancy()
+RETURNS TRIGGER AS $$
+BEGIN
+    -- Subtract from OLD room if updating or deleting
+    IF TG_OP = 'UPDATE' OR TG_OP = 'DELETE' THEN
+        IF OLD.room_id IS NOT NULL THEN
+            UPDATE room
+            SET current_occupancy = (
+                SELECT COUNT(*) FROM room_assignment
+                WHERE room_id = OLD.room_id AND assignment_status IN ('ACTIVE', 'UPCOMING')
+            )
+            WHERE id = OLD.room_id;
+        END IF;
+    END IF;
+
+    -- Add to NEW room if inserting or updating
+    IF TG_OP = 'UPDATE' OR TG_OP = 'INSERT' THEN
+        IF NEW.room_id IS NOT NULL THEN
+            UPDATE room
+            SET current_occupancy = (
+                SELECT COUNT(*) FROM room_assignment
+                WHERE room_id = NEW.room_id AND assignment_status IN ('ACTIVE', 'UPCOMING')
+            )
+            WHERE id = NEW.room_id;
+        END IF;
+    END IF;
+
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_update_room_occupancy
+AFTER INSERT OR UPDATE OF room_id, assignment_status OR DELETE
+ON room_assignment
+FOR EACH ROW
+EXECUTE FUNCTION recalculate_room_occupancy();
+
+-- -------------------------------------------------
+-- Validate Submission Timing
+-- -------------------------------------------------
+CREATE OR REPLACE FUNCTION validate_submission_window()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_start TIMESTAMP WITH TIME ZONE;
+    v_end   TIMESTAMP WITH TIME ZONE;
+BEGIN
+    SELECT start_time, end_time
+    INTO v_start, v_end
+    FROM batch
+    WHERE id = NEW.batch_id;
+
+    IF CURRENT_TIMESTAMP < v_start OR CURRENT_TIMESTAMP > v_end THEN
+        RAISE EXCEPTION 'Submission outside allowed batch window';
+    END IF;
+
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE TRIGGER trigger_validate_submission_window
+BEFORE INSERT
+ON allocation_submission
+FOR EACH ROW
+EXECUTE FUNCTION validate_submission_window();
+
+-- =========================================================
+-- 13. ROOM ASSIGNMENT PROCEDURE
+-- =========================================================
+CREATE OR REPLACE FUNCTION assign_student_to_room(
+    p_student_id INTEGER,
+    p_room_id UUID,
+    p_assigned_by assigned_by_enum
+)
+RETURNS BOOLEAN AS $$
+DECLARE
+    v_current_occupancy INT;
+    v_max_capacity INT;
+BEGIN
+    -- 1. Ensure student exists
+    IF NOT EXISTS (SELECT 1 FROM student WHERE id = p_student_id) THEN
+        RAISE EXCEPTION 'Student % does not exist', p_student_id;
+    END IF;
+
+    -- 2. Lock the room row to prevent double booking race conditions
+    SELECT current_occupancy, max_capacity
+    INTO v_current_occupancy, v_max_capacity
+    FROM room
+    WHERE id = p_room_id
+    FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'Room % does not exist', p_room_id;
+    END IF;
+
+    -- 3. Check Capacity
+    IF v_current_occupancy >= v_max_capacity THEN
+        RAISE EXCEPTION 'Room % is already at maximum capacity', p_room_id;
+    END IF;
+
+    -- 4. Mark any previous UPCOMING assignment for this student as PAST
+    UPDATE room_assignment
+    SET assignment_status = 'PAST', ended_at = CURRENT_TIMESTAMP
+    WHERE student_id = p_student_id AND assignment_status = 'UPCOMING';
+
+    -- 5. Insert new assignment
+    INSERT INTO room_assignment (
+        room_id, student_id, assigned_by, assignment_status
+    ) VALUES (
         p_room_id, p_student_id, p_assigned_by, 'UPCOMING'
     );
 
     RETURN TRUE;
 END;
 $$ LANGUAGE plpgsql;
-
 
 CREATE TABLE IF NOT EXISTS complaint_upvotes (
     complaint_id INTEGER REFERENCES complaint(id) ON DELETE CASCADE,

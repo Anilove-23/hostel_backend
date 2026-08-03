@@ -22,13 +22,14 @@ const pool = process.env.DATABASE_URL
 // Attach an error handler to the pool.
 // If an idle client in the pool experiences a network error, it will emit an 'error' event here.
 // Without this handler, Node.js will treat it as an unhandled error and crash the entire process.
-pool.on('error', (err, client) => {
-    console.error('Unexpected error on idle PostgreSQL client:', err);
+pool.on("error", (err) => {
+    console.error("Unexpected error on idle PostgreSQL client:", err);
 });
 
 pool.connect()
-    .then(() => {
+    .then((client) => {
         console.log("PostgreSQL connected successfully");
+        client.release();
     })
     .catch((err) => {
         console.error("Database connection error:", err);

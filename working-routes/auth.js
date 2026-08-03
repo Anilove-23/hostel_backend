@@ -5,17 +5,26 @@ import pool from '../src/db/pool.js';
 import auth from '../src/middleware/middleware.js';
 import dotenv from 'dotenv';
 import { generateOtp, storeOtp, verifyOtp } from '../src/utils/otp.js';
+import { getClientIp, getRefreshTokenExpiry, hashRefreshToken, compareRefreshTokens, lookupLocationFromIp } from '../src/utils/authHelpers.js';
+import { logAuthentication } from '../src/logging/services/auth.service.js';
+import { startSession, deactivateSessions, rotateSessionRefresh, endSession, getActiveSession, getActiveSessionByMachine,
+    updateGuardSession } from '../src/logging/services/session.service.js';
+import { mapActorType } from '../src/utils/actorType.js';
 
 const DEPARTMENT_PREFIXES = {
     CSE: 'BCS',
     ME: 'BME',
     CE: 'BCE',
+    CH: 'BCH',
     EE: 'BEE',
     ECE: 'BEC',
     MNC: 'BMA',
     'ENGINEERING PHYSICS': 'BPH',
     'MATERIAL SCIENCE': 'BMS',
+    'CHEMICAL ENGINEERING': 'BCH',
+    CHEMICAL: 'BCH',
     ARCHITECTURE: 'BAR',
+    BAR: 'BAR',
     'DUAL DEGREE CSE': 'DCS',
     'DUAL DEGREE ELECTRONICS': 'DEC',
 };
@@ -40,6 +49,9 @@ const DEPARTMENT_ALIASES = {
     BPH: 'ENGINEERING PHYSICS',
     'MATERIAL SCIENCE': 'MATERIAL SCIENCE',
     BMS: 'MATERIAL SCIENCE',
+    'CHEMICAL ENGINEERING': 'CHEMICAL ENGINEERING',
+    CHEMICAL: 'CHEMICAL ENGINEERING',
+    CH: 'CHEMICAL ENGINEERING',
     ARCHITECTURE: 'ARCHITECTURE',
     BAR: 'ARCHITECTURE',
     'DUAL DEGREE CSE': 'DUAL DEGREE CSE',
@@ -143,6 +155,103 @@ const ROLE_TABLES = {
     'chief-warden': 'admin'
 };
 
+const OTP_ENABLED_ROLES = new Set(['student', 'attendant', 'warden', 'chief-warden']);
+
+const createAuthenticatedSessionResponse = async (req, res, { user, role, clientIp, userAgent,  machineId = null,existingSession = null, refreshToken = null,
+        refreshTokenHash = null,
+        refreshExpiresAt = null }) => {
+    if (!refreshToken) {
+        refreshToken = jwt.sign(
+            { sub: user.id, role },
+            process.env.JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+    }
+    refreshTokenHash = await hashRefreshToken(refreshToken);
+    refreshExpiresAt = new Date(Date.now() + getRefreshTokenExpiry(role));
+    const location = await lookupLocationFromIp(clientIp);
+
+    if (role !== 'guard') {
+        await deactivateSessions({
+            actorId: user.id,
+            actorType: mapActorType(role)
+        });
+    }
+
+    await logAuthentication({
+        actorId: user.id,
+        actorType: mapActorType(role),
+        action: 'SIGN_IN',
+        success: true,
+        ipAddress: clientIp,
+        userAgent,
+        eventName: 'SESSION_REVOKED',
+        endpoint: req.originalUrl,
+        status: 200,
+        userEmail: user.email,
+        role,
+    });
+
+    let session;
+
+if (existingSession) {
+    session = existingSession;
+} else {
+    session = await startSession({
+        actorId: user.id,
+        actorType: mapActorType(role),
+        ipAddress: clientIp,
+        userAgent,
+        role,
+        refreshTokenHash,
+        refreshExpiresAt,
+        isActive: true,
+        machineId:
+            role === 'guard'
+                ? req.headers['x-machine-id']
+                : null
+    });
+}
+
+    const token = generateToken({
+        id: user.id,
+        email: user.email,
+        role,
+        authority_level: user.authority_level,
+        sessionId: session?.id,
+    });
+
+    await logAuthentication({
+        actorId: user.id,
+        actorType: mapActorType(role),
+        action: 'SIGN_IN',
+        success: true,
+        ipAddress: clientIp,
+        userAgent,
+        eventName: 'LOGIN_SUCCESS',
+        endpoint: req.originalUrl,
+        status: 200,
+        sessionId: session?.id,
+        userEmail: user.email,
+        role,
+        details: location || undefined,
+    });
+
+    if (location && session?.id) {
+        await pool.query(`UPDATE user_session SET city = $1, state = $2, country = $3 WHERE id = $4`, [location.city, location.state, location.country, session.id]);
+    }
+
+    return res.status(200).json({
+        success: true,
+        message: 'Login successful',
+        token,
+        refreshToken,
+        user,
+        role,
+        sessionId: session?.id
+    });
+};
+
 // ======================================================
 // VERIFY LOGIN TOKEN
 // ======================================================
@@ -188,12 +297,14 @@ router.get('/login', (req, res) => {
 
 
 // ======================================================
-// LOGIN
+// LOGIN (OTP for eligible roles, direct JWT for Guard)
 // ======================================================
 
 router.post('/login', async (req, res) => {
     const { email, password, role: requestedRole } = req.body || {};
     const role = requestedRole || inferRoleFromEmail(email) || 'student';
+    const clientIp = getClientIp(req);
+    const userAgent = req.get('user-agent') || '';
 
     if (!email || !password) {
         return res.status(400).json({
@@ -228,13 +339,25 @@ router.post('/login', async (req, res) => {
         }
 
         if (!user) {
+            await logAuthentication({
+                actorId: null,
+                actorType: mapActorType(role),
+                action: 'SIGN_IN',
+                success: false,
+                ipAddress: clientIp,
+                userAgent,
+                eventName: 'LOGIN_FAILED',
+                endpoint: req.originalUrl,
+                status: 401,
+                userEmail: email,
+                role,
+            });
             return res.status(401).json({
                 message: 'Invalid credentials'
             });
         }
 
-        const storedPassword =
-            user.password_hash ?? user.password;
+        const storedPassword = user.password_hash ?? user.password;
 
         const passwordMatch = await verifyStoredPassword(
             password,
@@ -242,20 +365,161 @@ router.post('/login', async (req, res) => {
         );
 
         if (!passwordMatch) {
+            await logAuthentication({
+                actorId: user.id,
+                actorType: mapActorType(role),
+                action: 'SIGN_IN',
+                success: false,
+                ipAddress: clientIp,
+                userAgent,
+                eventName: 'LOGIN_FAILED',
+                endpoint: req.originalUrl,
+                status: 401,
+                userEmail: user.email,
+                role,
+            });
             return res.status(401).json({
                 message: 'Invalid credentials'
             });
         }
 
-        const otp = generateOtp();
-        storeOtp(email, otp, role, user);
+        const machineIdHeader = req.headers['x-machine-id'] || req.headers['X-Machine-ID'];
+        const machineId = Array.isArray(machineIdHeader)
+            ? machineIdHeader[0]
+            : typeof machineIdHeader === 'string'
+                ? machineIdHeader
+                : '';
+        const normalizedMachineId = typeof machineId === 'string' ? machineId.trim() : '';
 
-        return res.status(200).json({
+        if (role === 'guard') {
+            
+
+            if (!normalizedMachineId) {
+                return res.status(400).json({
+                    message: 'Machine ID header (X-Machine-ID) is required for Guard login.'
+                });
+            }
+            const refreshToken = jwt.sign(
+    { sub: user.id, role },
+    process.env.JWT_SECRET,
+    { expiresIn: "7d" }
+);
+
+const refreshTokenHash = await hashRefreshToken(refreshToken);
+
+const refreshExpiresAt = new Date(
+    Date.now() + getRefreshTokenExpiry(role)
+);
+            const existingSession = await getActiveSessionByMachine({
+        actorId: user.id,
+        actorType: role,
+        machineId: normalizedMachineId
+    });
+
+
+    if (existingSession) {
+
+        return updateGuardSession(
+            existingSession.id,
+            {
+                ipAddress: clientIp,
+                userAgent,
+                refreshTokenHash,
+                refreshExpiresAt
+            }
+        ).then(() =>
+            createAuthenticatedSessionResponse(req, res, {
+                user,
+                role,
+                clientIp,
+                userAgent,
+                existingSession
+            })
+        );
+    }
+
+            const guardRecordResult = await pool.query(
+                `SELECT authorized_machine_1, authorized_machine_2 FROM guard WHERE id = $1 LIMIT 1`,
+                [user.id]
+            );
+            const guardRecord = guardRecordResult.rows[0] || {};
+            const authorizedMachine1 = guardRecord.authorized_machine_1;
+            const authorizedMachine2 = guardRecord.authorized_machine_2;
+
+            if (authorizedMachine1 && authorizedMachine2 && authorizedMachine1 !== normalizedMachineId && authorizedMachine2 !== normalizedMachineId) {
+                return res.status(403).json({
+                    message: 'Access Denied: This Guard account is already registered on 2 authorized gate machines.'
+                });
+            }
+
+            if (!authorizedMachine1) {
+                await pool.query(
+                    `UPDATE guard SET authorized_machine_1 = $1 WHERE id = $2`,
+                    [normalizedMachineId, user.id]
+                );
+            } else if (!authorizedMachine2) {
+                await pool.query(
+                    `UPDATE guard SET authorized_machine_2 = $1 WHERE id = $2`,
+                    [normalizedMachineId, user.id]
+                );
+            }
+
+            return createAuthenticatedSessionResponse(req, res, {
+                user,
+                role,
+                clientIp,
+                userAgent,
+            });
+        }
+
+        if (OTP_ENABLED_ROLES.has(role)) {
+            const otp = generateOtp();
+            storeOtp(email, otp, role, user);
+
+            await logAuthentication({
+                actorId: user.id,
+                actorType: mapActorType(role),
+                action: 'SIGN_IN',
+                success: true,
+                ipAddress: clientIp,
+                userAgent,
+                eventName: 'OTP_SENT',
+                endpoint: req.originalUrl,
+                status: 200,
+                userEmail: user.email,
+                role,
+            });
+
+            return res.status(200).json({
+                success: true,
+                message: 'OTP generated',
+                email,
+                role,
+                otp: process.env.NODE_ENV !== 'production' ? otp : undefined
+            });
+        await logAuthentication({
+            actorId: user.id,
+            actorType: mapActorType(role),
+            action: 'SIGN_IN',
             success: true,
-            message: 'OTP generated',
-            email,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'LOGIN_SUCCESS',
+            endpoint: req.originalUrl,
+            status: 200,
+            userEmail: user.email,
             role,
-            otp: process.env.NODE_ENV !== 'production' ? otp : undefined
+            details: location || undefined,
+        });
+        if (location) {
+            await pool.query(`UPDATE user_session SET city = $1, state = $2, country = $3 WHERE id = $4`, [location.city, location.state, location.country, session?.id]);
+        }
+
+        return createAuthenticatedSessionResponse(req, res, {
+            user,
+            role,
+            clientIp,
+            userAgent,
         });
 
     } catch (err) {
@@ -270,19 +534,31 @@ router.post('/login', async (req, res) => {
     }
 });
 
-router.post('/verify-otp', async (req, res) => {
+const finalizeSignup = async (req, res, { clientIp, userAgent }) => {
     const { email, otp } = req.body || {};
 
     if (!email || !otp) {
         return res.status(400).json({
             success: false,
-            message: 'Invalid or expired OTP'
+            message: 'Email and OTP are required'
         });
     }
 
     const result = verifyOtp(email, otp);
 
     if (!result || !result.valid) {
+        await logAuthentication({
+            actorId: null,
+            actorType: mapActorType('student'),
+            action: 'SIGN_UP',
+            success: false,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'INVALID_OTP',
+            endpoint: req.originalUrl,
+            status: 400,
+            userEmail: email,
+        });
         return res.status(400).json({
             success: false,
             message: 'Invalid or expired OTP'
@@ -290,23 +566,223 @@ router.post('/verify-otp', async (req, res) => {
     }
 
     const payload = result.payload;
+    const tempUser = payload.user || payload;
+    let createdUser = null;
 
-    const token = generateToken({
-        id: payload.id ?? payload.user?.id,
-        email: payload.email,
-        role: payload.role,
-        authority_level: payload.authority_level ?? payload.user?.authority_level,
-    });
+    try {
+        if (tempUser && tempUser.role) {
+            const role = tempUser.role;
 
-    return res.status(200).json({
-        success: true,
-        token,
-        user: payload.user,
-        role: payload.role
+            if (role === 'student') {
+                const insertRes = await pool.query(
+                    `INSERT INTO student (name, email, password, hostel, hostel_id, roll_no, phone, department)
+                     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+                     RETURNING *`,
+                    [
+                        tempUser.name,
+                        tempUser.email,
+                        tempUser.password,
+                        tempUser.hostel,
+                        tempUser.hostel_id,
+                        tempUser.rollno,
+                        tempUser.phone,
+                        tempUser.department
+                    ]
+                );
+                createdUser = insertRes.rows[0];
+            } else if (role === 'attendant') {
+                const insertRes = await pool.query(
+                    `INSERT INTO attendent (name, email, password, hostel, hostel_id, phone)
+                     VALUES ($1, $2, $3, $4, $5, $6)
+                     RETURNING *`,
+                    [
+                        tempUser.name,
+                        tempUser.email,
+                        tempUser.password,
+                        tempUser.hostel,
+                        tempUser.hostel_id,
+                        tempUser.phone
+                    ]
+                );
+                createdUser = insertRes.rows[0];
+            } else if (role === 'guard') {
+                const insertRes = await pool.query(
+                    `INSERT INTO guard (name, email, password, phone)
+                     VALUES ($1, $2, $3, $4)
+                     RETURNING *`,
+                    [
+                        tempUser.name,
+                        tempUser.email,
+                        tempUser.password,
+                        tempUser.phone
+                    ]
+                );
+                createdUser = insertRes.rows[0];
+            } else if (role === 'warden') {
+                const insertRes = await pool.query(
+                    `INSERT INTO admin (name, email, password, authority_level)
+                     VALUES ($1, $2, $3, $4)
+                     RETURNING *`,
+                    [
+                        tempUser.name,
+                        tempUser.email,
+                        tempUser.password,
+                        tempUser.authority_level
+                    ]
+                );
+                createdUser = insertRes.rows[0];
+            }
+        }
+
+        const userObj = createdUser || tempUser;
+        const role = tempUser.role;
+        const refreshToken = jwt.sign({ sub: userObj.id, role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        const refreshTokenHash = await hashRefreshToken(refreshToken);
+        const refreshExpiresAt = new Date(Date.now() + getRefreshTokenExpiry(role));
+        const location = await lookupLocationFromIp(clientIp);
+
+        await deactivateSessions({
+            actorId: userObj.id,
+            actorType: mapActorType(role)
+        });
+
+        const session = await startSession({
+            actorId: userObj.id,
+            actorType: mapActorType(role),
+            ipAddress: clientIp,
+            userAgent,
+            role,
+            refreshTokenHash,
+            refreshExpiresAt,
+            isActive: true,
+        
+        });
+
+        const token = generateToken({
+            id: userObj.id,
+            email: userObj.email,
+            role,
+            authority_level: userObj.authority_level,
+            sessionId: session?.id,
+        });
+
+        await logAuthentication({
+            actorId: userObj.id,
+            actorType: mapActorType(role),
+            action: 'SIGN_UP',
+            success: true,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'ACCOUNT_CREATED',
+            endpoint: req.originalUrl,
+            status: 200,
+            userEmail: userObj.email,
+            role,
+        });
+
+        await logAuthentication({
+            actorId: userObj.id,
+            actorType: mapActorType(role),
+            action: 'SIGN_IN',
+            success: true,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'OTP_VERIFIED',
+            endpoint: req.originalUrl,
+            status: 200,
+            userEmail: userObj.email,
+            role,
+            details: location || undefined,
+        });
+
+        if (location && session?.id) {
+            await pool.query(`UPDATE user_session SET city = $1, state = $2, country = $3 WHERE id = $4`, [location.city, location.state, location.country, session.id]);
+        }
+
+        return res.status(200).json({
+            success: true,
+            message: 'OTP verified and user created',
+            token,
+            refreshToken,
+            user: userObj,
+            role,
+            sessionId: session?.id
+        });
+    } catch (err) {
+        console.error("Error creating user during OTP verification:", err);
+        return res.status(500).json({
+            success: false,
+            message: err.message || 'Failed to complete registration',
+            code: err.code
+        });
+    }
+};
+
+router.post('/verify-login-otp', async (req, res) => {
+    const { email, otp, role: requestedRole } = req.body || {};
+    const clientIp = getClientIp(req);
+    const userAgent = req.get('user-agent') || '';
+
+    if (!email || !otp) {
+        return res.status(400).json({
+            success: false,
+            message: 'Email and OTP are required'
+        });
+    }
+
+    const result = verifyOtp(email, otp);
+
+    if (!result || !result.valid) {
+        await logAuthentication({
+            actorId: null,
+            actorType: mapActorType(requestedRole || inferRoleFromEmail(email) || 'student'),
+            action: 'SIGN_IN',
+            success: false,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'OTP_FAILED',
+            endpoint: req.originalUrl,
+            status: 401,
+            userEmail: email,
+            role: requestedRole || inferRoleFromEmail(email) || 'student',
+        });
+
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid or expired OTP'
+        });
+    }
+
+    const payload = result.payload;
+    const role = payload.role || requestedRole || inferRoleFromEmail(email) || 'student';
+    const user = payload.user || payload;
+
+    if (!user?.id) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid OTP payload'
+        });
+    }
+
+    return createAuthenticatedSessionResponse(req, res, {
+        user,
+        role,
+        clientIp,
+        userAgent,
     });
 });
 
-// ======================================================
+router.post('/verify-otp', async (req, res) => {
+    const clientIp = getClientIp(req);
+    const userAgent = req.get('user-agent') || '';
+    return finalizeSignup(req, res, { clientIp, userAgent });
+});
+
+router.post('/signup', async (req, res) => {
+    const clientIp = getClientIp(req);
+    const userAgent = req.get('user-agent') || '';
+    return finalizeSignup(req, res, { clientIp, userAgent });
+});
 // CURRENT USER
 // ======================================================
 
@@ -358,12 +834,14 @@ router.get('/me', auth, async (req, res) => {
 
 
 // ======================================================
-// SIGNUP
+// SIGNUP STEP 1: SEND OTP
 // ======================================================
 
-router.post('/signup', async (req, res) => {
+router.post('/send-otp', async (req, res) => {
 
     const data = req.body;
+    const clientIp = getClientIp(req);
+    const userAgent = req.get('user-agent') || '';
 
     if (!data || !data.role) {
         return res.status(400).json({
@@ -373,18 +851,17 @@ router.post('/signup', async (req, res) => {
 
     try {
 
-        let result;
-        let user;
+        let tempUserData = {};
+        const { role, email } = data;
 
         // ======================================================
         // STUDENT SIGNUP
         // ======================================================
 
-        if (data.role === 'student') {
+        if (role === 'student') {
 
             const {
                 name,
-                email,
                 password,
                 phone,
                 department,
@@ -402,8 +879,6 @@ router.post('/signup', async (req, res) => {
             if (!department) missingFields.push('department');
             if (!rollno) missingFields.push('rollno');
             if (!hostel) missingFields.push('hostel');
-            if (!degree_type) missingFields.push('degree_type');
-            if (!academic_year) missingFields.push('academic_year');
 
             if (missingFields.length > 0) {
                 return res.status(400).json({
@@ -461,48 +936,29 @@ router.post('/signup', async (req, res) => {
             const hostelData = hostelResult.rows[0];
             const hashedPassword = await bcrypt.hash(password, 10);
 
-            result = await pool.query(
-                `INSERT INTO student
-    (
-        name,
-        email,
-        password,
-        hostel,
-        hostel_id,
-        roll_no,
-        phone,
-        department,
-        degree_type,
-        academic_year
-    )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-    RETURNING *`,
-                [
-                    name,
-                    email,
-                    hashedPassword,
-                    hostelData.name,
-                    hostelData.id,
-                    rollno,
-                    phone,
-                    department,
-                    degree_type,
-                    academic_year
-                ]
-            );
-
-            user = result.rows[0];
+            tempUserData = {
+                role,
+                name,
+                email,
+                password: hashedPassword,
+                hostel: hostelData.name,
+                hostel_id: hostelData.id,
+                rollno,
+                phone,
+                department,
+                degree_type,
+                academic_year
+            };
         }
 
         // ======================================================
         // ATTENDANT SIGNUP
         // ======================================================
 
-        else if (data.role === 'attendant') {
+        else if (role === 'attendant') {
 
             const {
                 name,
-                email,
                 password,
                 hostel,
                 phone
@@ -537,43 +993,27 @@ router.post('/signup', async (req, res) => {
             }
 
             const hostelData = hostelResult.rows[0];
-
             const hashedPasswordAttendant = await bcrypt.hash(password, 10);
 
-            result = await pool.query(
-                `INSERT INTO attendent
-                (
-                    name,
-                    email,
-                    password,
-                    hostel,
-                    hostel_id,
-                    phone
-                )
-                VALUES ($1,$2,$3,$4,$5,$6)
-                RETURNING *`,
-                [
-                    name,
-                    email,
-                    hashedPasswordAttendant,
-                    hostelData.name,
-                    hostelData.id,
-                    phone
-                ]
-            );
-
-            user = result.rows[0];
+            tempUserData = {
+                role,
+                name,
+                email,
+                password: hashedPasswordAttendant,
+                hostel: hostelData.name,
+                hostel_id: hostelData.id,
+                phone
+            };
         }
 
         // ======================================================
         // GUARD SIGNUP
         // ======================================================
 
-        else if (data.role === 'guard') {
+        else if (role === 'guard') {
 
             const {
                 name,
-                email,
                 password,
                 phone
             } = data;
@@ -592,36 +1032,23 @@ router.post('/signup', async (req, res) => {
 
             const hashedPasswordGuard = await bcrypt.hash(password, 10);
 
-            result = await pool.query(
-                `INSERT INTO guard
-                (
-                    name,
-                    email,
-                    password,
-                    phone
-                )
-                VALUES ($1,$2,$3,$4)
-                RETURNING *`,
-                [
-                    name,
-                    email,
-                    hashedPasswordGuard,
-                    phone
-                ]
-            );
-
-            user = result.rows[0];
+            tempUserData = {
+                role,
+                name,
+                email,
+                password: hashedPasswordGuard,
+                phone
+            };
         }
 
         // ======================================================
         // WARDEN SIGNUP
         // ======================================================
 
-        else if (data.role === 'warden') {
+        else if (role === 'warden') {
 
             const {
                 name,
-                email,
                 password,
                 authority_level
             } = data;
@@ -647,28 +1074,15 @@ router.post('/signup', async (req, res) => {
 
             const hashedPasswordWarden = await bcrypt.hash(password, 10);
 
-            result = await pool.query(
-                `
-        INSERT INTO admin
-        (
-            name,
-            email,
-            password_hash,
-            authority_level
-        )
-        VALUES ($1,$2,$3,$4)
-        RETURNING *
-        `,
-                [
-                    name,
-                    email,
-                    hashedPasswordWarden,
-                    authority_level
-                ]
-            );
-
-            user = result.rows[0];
+            tempUserData = {
+                role,
+                name,
+                email,
+                password: hashedPasswordWarden,
+                authority_level
+            };
         }
+
         // ======================================================
         // INVALID ROLE
         // ======================================================
@@ -680,15 +1094,37 @@ router.post('/signup', async (req, res) => {
         }
 
         // ======================================================
-        // GENERATE JWT TOKEN
+        // GENERATE AND STORE OTP
         // ======================================================
 
-        const token = generateToken({ id: user.id, email: user.email, role: data.role });
-        return res.status(201).json({ message: 'User created successfully', user, token });
+        const otp = generateOtp();
+        storeOtp(email, otp, role, tempUserData);
+
+        await logAuthentication({
+            actorId: null,
+            actorType: mapActorType(role),
+            action: 'SIGN_UP',
+            success: true,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'OTP_SENT',
+            endpoint: req.originalUrl,
+            status: 200,
+            userEmail: email,
+            role,
+        });
+
+        return res.status(200).json({
+            success: true,
+            message: 'OTP sent successfully to email.',
+            email,
+            role,
+            otp: process.env.NODE_ENV !== 'production' ? otp : undefined
+        });
+
     } catch (err) {
         console.error("Signup error:", err);
 
-        // Handle specific Postgres duplicate key constraint violations (e.g. email or roll number already exists)
         if (err.code === '23505') {
             let detailMessage = 'Email or roll number already exists.';
             if (err.detail) {
@@ -715,10 +1151,125 @@ router.post('/signup', async (req, res) => {
 // LOGOUT
 // ======================================================
 
-router.post('/logout', (req, res) => {
-    return res.status(200).json({
-        message: 'Logout successful'
-    });
+router.post('/logout', async (req, res) => {
+    const clientIp = getClientIp(req);
+    const userAgent = req.get('user-agent') || '';
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7)
+        : req.headers.token;
+
+    if (!token) {
+        return res.status(401).json({ message: 'Token is required' });
+    }
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const activeSession = await getActiveSession({ actorId: decoded.id, actorType: mapActorType(decoded.role || 'student') });
+        await deactivateSessions({ actorId: decoded.id, actorType: mapActorType(decoded.role || 'student') });
+        if (activeSession?.id) {
+            await endSession(activeSession.id);
+        }
+        await logAuthentication({
+            actorId: decoded.id,
+            actorType: mapActorType(decoded.role || 'student'),
+            action: 'SIGN_OUT',
+            success: true,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'LOGOUT',
+            endpoint: req.originalUrl,
+            status: 200,
+            userEmail: decoded.email,
+            role: decoded.role,
+        });
+
+        return res.status(200).json({
+            message: 'Logout successful'
+        });
+    } catch (err) {
+        return res.status(401).json({ message: 'Invalid token' });
+    }
+});
+
+router.post('/refresh', async (req, res) => {
+    const clientIp = getClientIp(req);
+    const userAgent = req.get('user-agent') || '';
+    const authHeader = req.headers.authorization || '';
+    const token = authHeader.startsWith('Bearer ')
+        ? authHeader.slice(7)
+        : req.headers.token;
+    const refreshToken = req.body?.refreshToken;
+
+    if (!token || !refreshToken) {
+        return res.status(401).json({ message: 'Token and refresh token are required' });
+    }
+
+    try {
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        const activeSession = await getActiveSession({ actorId: decoded.id, actorType: mapActorType(decoded.role || 'student') });
+
+        if (!activeSession || !activeSession.refresh_token_hash) {
+            return res.status(401).json({ message: 'Invalid refresh token' });
+        }
+
+        const tokenMatches = await compareRefreshTokens(refreshToken, activeSession.refresh_token_hash);
+        if (!tokenMatches || new Date(activeSession.refresh_expires_at) < new Date()) {
+            return res.status(401).json({ message: 'Invalid or expired refresh token' });
+        }
+
+        const newRefreshToken = jwt.sign({ sub: decoded.id, role: decoded.role }, process.env.JWT_SECRET, { expiresIn: '7d' });
+        const newRefreshTokenHash = await hashRefreshToken(newRefreshToken);
+        const newRefreshExpiresAt = new Date(Date.now() + getRefreshTokenExpiry(decoded.role));
+        const updatedSession = await rotateSessionRefresh(activeSession.id, {
+            refreshTokenHash: newRefreshTokenHash,
+            refreshExpiresAt: newRefreshExpiresAt,
+            isActive: true,
+        });
+
+        await logAuthentication({
+            actorId: decoded.id,
+            actorType: mapActorType(decoded.role || 'student'),
+            action: 'SIGN_IN',
+            success: true,
+            ipAddress: clientIp,
+            userAgent,
+            eventName: 'REFRESH_TOKEN_ROTATED',
+            endpoint: req.originalUrl,
+            status: 200,
+            userEmail: decoded.email,
+            role: decoded.role,
+        });
+
+        return res.status(200).json({
+            success: true,
+            token: jwt.sign({ id: decoded.id, email: decoded.email, role: decoded.role, authority_level: decoded.authority_level }, process.env.JWT_SECRET, { expiresIn: '1h' }),
+            refreshToken: newRefreshToken,
+            sessionId: updatedSession?.id,
+        });
+    } catch (err) {
+        return res.status(401).json({ message: 'Invalid refresh token' });
+    }
+});
+router.get("/debug/sessions", async (req, res) => {
+  try {
+    const result = await pool.query(`
+      SELECT
+        id,
+        actor_id,
+        actor_type,
+        is_active,
+        login_time,
+        ip_address
+      FROM user_session
+      ORDER BY login_time DESC;
+    `);
+
+    res.json(result.rows);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: err.message });
+  }
 });
 
 export default router;
