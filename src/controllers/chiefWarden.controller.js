@@ -1,7 +1,7 @@
 import  pool  from "../db/pool.js"; // adjust path to match your existing pool import
 import  asyncHandler  from "../utils/asyncHandler.js";
-import  ApiError from "../utils/ApiError.js";
-import  ApiResponse from "../utils/ApiResponse.js";
+import  ApiError from "../utils/apiError.js";
+import  ApiResponse from "../utils/apiResponse.js";
 
 /**
  * @desc    Get complete outpass details (Chief Warden has unrestricted access)
