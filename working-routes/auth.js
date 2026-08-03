@@ -497,6 +497,7 @@ const refreshExpiresAt = new Date(
                 role,
                 otp: process.env.NODE_ENV !== 'production' ? otp : undefined
             });
+        }
         await logAuthentication({
             actorId: user.id,
             actorType: mapActorType(role),
