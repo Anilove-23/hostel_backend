@@ -983,6 +983,8 @@ const getOutpassDetails = asyncHandler(async (req, res) => {
     const { id } = req.params;
     const attendantId = req.user?.id;
 
+    console.log("req.params.id =", req.params.id);
+
     if (!Number.isInteger(Number(id)) || Number(id) <= 0) {
         throw new ApiError(
             400,
