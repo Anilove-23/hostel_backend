@@ -708,3 +708,25 @@ CREATE TABLE IF NOT EXISTS complaint_upvotes (
     student_id INTEGER REFERENCES student(id) ON DELETE CASCADE,
     PRIMARY KEY (complaint_id, student_id)
 );
+
+-- =========================================================
+-- DAY SCHOLAR TABLES
+-- =========================================================
+
+CREATE TABLE IF NOT EXISTS day_scholar (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    name VARCHAR(255) NOT NULL,
+    roll_no VARCHAR(255) UNIQUE NOT NULL,
+    degree_type VARCHAR(100),
+    phone VARCHAR(20),
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS day_scholar_log (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    day_scholar_id UUID REFERENCES day_scholar(id) ON DELETE CASCADE,
+    gate VARCHAR(255),
+    direction VARCHAR(10) CHECK (direction IN ('ENTRY', 'EXIT')),
+    timestamp TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    guard_id INTEGER REFERENCES guard(id) ON DELETE SET NULL
+);

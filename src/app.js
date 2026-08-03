@@ -23,6 +23,7 @@ import studentRoutes from "./routes/student.routes.js";
 import authRoutes from "../working-routes/auth.js";
 import complaintRoutes from "../working-routes/complaint.js";
 import outpassRoutesWorking from "../working-routes/outpass.js";
+import dayScholarRoutes from "../working-routes/day_scholar.js";
 
 // Face Authentication Routes
 import faceAuthRoutes from "./face-auth/routes/face.routes.js";
@@ -118,6 +119,7 @@ app.use("/api/auth", authRoutes);
 // Working Routes
 app.use("/complaint", complaintRoutes);
 app.use("/outpass", outpassRoutesWorking);
+app.use("/api/v1/dayscholar", dayScholarRoutes);
 
 // Outpass
 app.use("/api/outpasses", outpassRoutes);

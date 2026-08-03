@@ -127,7 +127,7 @@ const inferRoleFromEmail = (email) => {
     const normalizedEmail = String(email || '').trim().toLowerCase();
 
     if (!normalizedEmail) return 'student';
-    if (normalizedEmail.includes('attendant')) return 'attendant';
+    if (normalizedEmail.includes('attendant') || normalizedEmail.includes('att_')) return 'attendant';
     if (normalizedEmail.includes('chief')) return 'chief-warden';
     if (normalizedEmail.includes('guard')) return 'guard';
     if (normalizedEmail.includes('warden')) return 'warden';

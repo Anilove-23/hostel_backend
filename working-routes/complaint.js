@@ -491,5 +491,42 @@ router.put(
     }
   }
 );
+/* =================================================
+ESCALATED COMPLAINTS
+================================================= */
+
+router.get(
+  "/escalated",
+  auth,
+  async (req, res) => {
+    try {
+      const complaints = await pool.query(`
+        SELECT
+          c.*,
+          s.name AS student_name,
+          s.roll_no AS student_roll_no,
+          s.phone AS student_phone,
+          s.department AS student_department
+        FROM complaint c
+        JOIN student s ON c.student_id = s.id
+        WHERE c.status NOT IN ('Resolved', 'resolved')
+        AND c.date_created < NOW() - INTERVAL '7 days'
+        ORDER BY c.date_created ASC
+      `);
+
+      return res.status(200).json({
+        complaints: complaints.rows,
+      });
+    } catch (err) {
+      console.error("Error in escalated complaints:", err);
+      return res.status(500).json({
+        message: err.message || "Internal server error",
+        error: err.toString(),
+        detail: err.detail,
+        code: err.code,
+      });
+    }
+  }
+);
 
 export default router;
