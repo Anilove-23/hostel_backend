@@ -6,70 +6,55 @@ import { mapActorType } from '../utils/actorType.js';
 dotenv.config();
 
 const auth = async (req, res, next) => {
+    // Accept token from:
+    //   1. httpOnly cookie (preferred — set by the server on login)
+    //   2. Authorization: Bearer <token> header (fallback for non-browser clients)
+    //   3. Legacy `token` header
+    const cookieToken = req.cookies?.token;
     const authHeader = req.headers.authorization || '';
-    const token = authHeader.startsWith('Bearer ')
-        ? authHeader.slice(7)
-        : req.headers.token;
-    const headerRole = req.headers.role;
+    const token = cookieToken
+        || (authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null)
+        || req.headers.token;
 
-    if (!token || !headerRole) {
-        return res.status(401).json({ message: 'Token and role are required' });
+    if (!token) {
+        return res.status(401).json({ message: 'Authentication token is required' });
     }
 
     try {
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        // Always derive role from the JWT payload — never trust client-supplied headers
         const actorId = decoded.id ?? decoded.sub ?? null;
-        const userRole = decoded.role || headerRole; // Fallback to header role if missing in payload
-        const mappedActorType = mapActorType(userRole);
+        const userRole = decoded.role;
 
-        // --- DEBUG LOGS (Watch your Node.js server console) ---
-        console.log(`[Auth Debug] User ID: ${actorId} | Role: ${userRole} | Mapped: ${mappedActorType}`);
-        console.log(`[Auth Debug] Token SessionId:`, decoded.sessionId);
+        if (!userRole) {
+            return res.status(401).json({ message: 'Token is missing role claim. Please log in again.' });
+        }
 
-        // --- SINGLE SESSION ENFORCEMENT ---
-       // --- SINGLE SESSION ENFORCEMENT ---
-        // 1. Force re-login if the JWT does not contain a sessionId
+        // Force re-login if the JWT does not contain a sessionId
         if (!decoded.sessionId) {
-            console.warn(`[Auth Revoked] Token missing sessionId for Actor ID ${actorId}. Forcing re-login.`);
-            return res.status(401).json({ 
-                message: 'Your token is outdated. Please log in again.' 
+            return res.status(401).json({
+                message: 'Your token is outdated. Please log in again.'
             });
         }
 
-        // 2. Query active session in DB for this user
+        const mappedActorType = mapActorType(userRole);
+
+        // Query active session in DB for this user
         const activeSession = actorId
             ? await getActiveSession({ actorId, actorType: mappedActorType })
             : null;
 
-        console.log(`[Auth Debug] Token SessionId: ${decoded.sessionId} | DB Active SessionId: ${activeSession?.id}`);
-
-        // 3. Reject if session was deactivated or IDs do not match
+        // Reject if session was deactivated or IDs do not match
         if (!activeSession || String(activeSession.id) !== String(decoded.sessionId)) {
-            console.warn(`[Auth Revoked] Session mismatch for Actor ID ${actorId}. Token: ${decoded.sessionId} | DB: ${activeSession?.id}`);
-            return res.status(401).json({ 
-                message: 'Your session has expired because you logged in on another device.' 
+            return res.status(401).json({
+                message: 'Your session has expired. Please log in again.'
             });
-        }
-
-        // --- ROLE VALIDATION ---
-        const roleGroups = {
-            student: ['student'],
-            attendant: ['attendant', 'admin'],
-            guard: ['guard'],
-            warden: ['warden', 'admin'],
-            'chief-warden': ['chief-warden', 'warden', 'admin']
-        };
-
-        const acceptedRoles = roleGroups[userRole] || [userRole];
-
-        if (!acceptedRoles.includes(headerRole)) {
-            return res.status(401).json({ message: 'Unauthorized role access' });
         }
 
         req.user = decoded;
         return next();
     } catch (err) {
-        console.error(`[Auth] Token verification failed: ${err.message}`);
         return res.status(401).json({ message: 'Invalid or expired token' });
     }
 };

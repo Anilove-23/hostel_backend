@@ -1,18 +1,12 @@
 import express from "express";
 import cors from "cors";
+import helmet from "helmet";
 import cookieParser from "cookie-parser";
 
-import pool from "./db/pool.js";
+import dotenv from "dotenv";
+dotenv.config();
 
-// === Our Room Allocation Routes ===
-import groupRoutes from "./roomallocation/groups/groups.routes.js";
-import roomRoutes from "./roomallocation/rooms/rooms.routes.js";
-import hostelRoutes from "./roomallocation/hostels/hostels.routes.js";
-import preferenceRoutes from "./roomallocation/preferences/preferences.routes.js";
-import allocationRoutes from "./roomallocation/allocation.routes.js";
-import adminRoutes from "./roomallocation/admin/admin.routes.js";
-import eventRoutes from "./roomallocation/admin/event.routes.js";
-import wardenRoutes from "./roomallocation/first-year-allocation/warden.routes.js";
+
 
 import importRoutes from "./imports/import.routes.js";
 
@@ -26,7 +20,7 @@ import complaintRoutes from "../working-routes/complaint.js";
 import outpassRoutesWorking from "../working-routes/outpass.js";
 import dayScholarRoutes from "../working-routes/day_scholar.js";
 
-// === NEW: Our Custom Warden Room Management Routes ===
+// === Custom Warden Room Management Routes ===
 import wardenRoomRoutes from "./routes/roomRoutes.js";
 
 // Face Authentication Routes
@@ -45,18 +39,46 @@ const app = express();
 GLOBAL MIDDLEWARES
 =====================================================
 */
+
+// Security headers — works on both localhost and production.
+// On localhost, HSTS is not enforced by browsers so it is safe.
+app.use(helmet());
+
 app.use(
     cors({
-        origin: true,
+        origin: (origin, callback) => {
+            // Allow requests with no origin (Postman, curl, server-to-server)
+            if (!origin) return callback(null, true);
+
+            // In production, only allow the configured frontend URL
+            if (process.env.NODE_ENV === "production") {
+                return origin === process.env.FRONTEND_URL
+                    ? callback(null, true)
+                    : callback(new Error("Not allowed by CORS"));
+            }
+
+            // In development, allow any localhost/127.0.0.1 origin
+            if (/^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
+                return callback(null, true);
+            }
+
+            // Also allow the explicitly configured frontend URL if set
+            if (process.env.FRONTEND_URL && origin === process.env.FRONTEND_URL) {
+                return callback(null, true);
+            }
+
+            callback(new Error("Not allowed by CORS"));
+        },
         credentials: true,
     })
 );
 
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 app.use(
     express.urlencoded({
         extended: true,
+        limit: "1mb",
     })
 );
 
@@ -64,20 +86,9 @@ app.use(cookieParser());
 
 /*
 =====================================================
-REQUEST LOGGER
+HEALTH CHECK
 =====================================================
 */
-app.use((req, res, next) => {
-    console.log(`${req.method} ${req.originalUrl}`);
-    next();
-});
-
-/*
-=====================================================
-HEALTH CHECK ROUTES
-=====================================================
-*/
-// Root Route
 app.get("/", (req, res) => {
     return res.status(200).json({
         success: true,
@@ -85,40 +96,12 @@ app.get("/", (req, res) => {
     });
 });
 
-// Debug Route
-app.post("/debug", (req, res) => {
-    console.log("BODY:", req.body);
-    return res.status(200).json({
-        success: true,
-        body: req.body,
-    });
-});
-
-// Database Test Route
-app.get("/test-db", async (req, res) => {
-    try {
-        const result = await pool.query("SELECT NOW()");
-
-        return res.status(200).json({
-            success: true,
-            message: "Database connected successfully",
-            data: result.rows[0],
-        });
-    } catch (error) {
-        return res.status(500).json({
-            success: false,
-            message: error.message,
-        });
-    }
-});
-
 /*
 =====================================================
 API ROUTES
 =====================================================
 */
-// Auth Routes (kept at /auth to match the existing frontend's apiFetch calls;
-// also mounted at /api/auth for origin/main compatibility)
+// Auth Routes (mounted at both /auth and /api/auth for compatibility)
 app.use("/auth", authRoutes);
 app.use("/api/auth", authRoutes);
 
@@ -145,21 +128,13 @@ app.use("/api/logs", logRouter);
 // Late-return Notification System
 app.use("/api/notifications", notificationRouter);
 
-// === Room Allocation ===
-app.use("/api/groups", groupRoutes);
-app.use("/api/rooms", roomRoutes); // Team's existing room routes
-app.use("/api/hostels", hostelRoutes);
-app.use("/api/preferences", preferenceRoutes);
-app.use("/api/allocation", allocationRoutes);
-app.use("/api/admin", adminRoutes);
-app.use("/api/admin", eventRoutes);  // Year-based allocation event management
-app.use("/api/warden", wardenRoutes);
+
 app.use("/api/chief-warden", chiefWardenRoutes);
 
 // Import Routes
 app.use("/api/import", importRoutes);
 
-// === NEW: Connect Our Warden Room Management Module ===
+// === Warden Room Management Module ===
 app.use("/api/v1/hostels/:hostelId/rooms", wardenRoomRoutes);
 
 /*

@@ -5,34 +5,75 @@ dotenv.config();
 
 const { Pool } = pg;
 
-// Supports DATABASE_URL (Railway/cloud) or individual DB_* vars
-const pool = process.env.DATABASE_URL
-    ? new Pool({
+const RETRY_INTERVAL_MS = 30_000; // 30 seconds
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Build pool config
+// ──────────────────────────────────────────────────────────────────────────────
+const isLocalhost =
+    process.env.DATABASE_URL &&
+    (process.env.DATABASE_URL.includes("localhost") ||
+        process.env.DATABASE_URL.includes("127.0.0.1"));
+
+const poolConfig = process.env.DATABASE_URL
+    ? {
           connectionString: process.env.DATABASE_URL,
-          ssl: { rejectUnauthorized: false },
-      })
-    : new Pool({
+          ...(isLocalhost ? {} : { ssl: { rejectUnauthorized: false } }),
+      }
+    : {
           user:     process.env.DB_USER,
           host:     process.env.DB_HOST,
           database: process.env.DB_NAME,
           password: process.env.DB_PASSWORD,
           port:     process.env.DB_PORT,
-      });
+      };
 
-// Attach an error handler to the pool.
-// If an idle client in the pool experiences a network error, it will emit an 'error' event here.
-// Without this handler, Node.js will treat it as an unhandled error and crash the entire process.
+const pool = new Pool(poolConfig);
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Connection health checker with automatic retry
+// ──────────────────────────────────────────────────────────────────────────────
+let retryTimer = null;
+let isConnected = false;
+
+function scheduleRetry() {
+    if (retryTimer) return; // already scheduled
+    console.warn(
+        `[DB] Connection lost. Retrying in ${RETRY_INTERVAL_MS / 1000}s…`
+    );
+    retryTimer = setTimeout(checkConnection, RETRY_INTERVAL_MS);
+}
+
+async function checkConnection() {
+    retryTimer = null;
+    let client;
+    try {
+        client = await pool.connect();
+        if (!isConnected) {
+            console.log("[DB] PostgreSQL reconnected successfully.");
+            isConnected = true;
+        }
+        client.release();
+    } catch (err) {
+        isConnected = false;
+        console.error("[DB] Reconnect attempt failed:", err.message);
+        scheduleRetry();
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Idle-client errors (e.g., server closed the connection while pool was idle)
+// Without this handler Node.js would crash with an unhandled error event.
+// ──────────────────────────────────────────────────────────────────────────────
 pool.on("error", (err) => {
-    console.error("Unexpected error on idle PostgreSQL client:", err);
+    console.error("[DB] Unexpected error on idle PostgreSQL client:", err.message);
+    isConnected = false;
+    scheduleRetry();
 });
 
-pool.connect()
-    .then((client) => {
-        console.log("PostgreSQL connected successfully");
-        client.release();
-    })
-    .catch((err) => {
-        console.error("Database connection error:", err);
-    });
+// ──────────────────────────────────────────────────────────────────────────────
+// Initial connection attempt (retries on failure)
+// ──────────────────────────────────────────────────────────────────────────────
+checkConnection();
 
 export default pool;

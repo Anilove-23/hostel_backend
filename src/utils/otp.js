@@ -1,8 +1,13 @@
+import { randomInt } from 'crypto';
+
 const otpStore = new Map();
 const OTP_TTL_MS = 5 * 60 * 1000;
 
+/**
+ * Generate a cryptographically secure 6-digit OTP.
+ */
 export function generateOtp() {
-  return Math.floor(100000 + Math.random() * 900000);
+  return randomInt(100000, 1000000); // [100000, 1000000)
 }
 
 export function storeOtp(email, otp, role, user, ttlMs = OTP_TTL_MS) {
@@ -18,6 +23,7 @@ export function storeOtp(email, otp, role, user, ttlMs = OTP_TTL_MS) {
     expiresAt: Date.now() + ttlMs,
   });
 
+  // Only log to server console in non-production environments — never send in API response
   if (process.env.NODE_ENV !== 'production') {
     console.log(`[OTP] ${normalizedEmail}: ${code}`);
   }
