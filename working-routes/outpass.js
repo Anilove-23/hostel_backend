@@ -1,10 +1,11 @@
 import express from 'express';
 import pool from '../src/db/db.js';
 import auth from '../src/middleware/middleware.js';
+import authorizeRoles from '../src/middleware/authorizeRoles.js';
 
 const router = express.Router();
 
-router.post('/apply', auth, async (req, res) => {
+router.post('/apply', auth, authorizeRoles('student'), async (req, res) => {
     const { reason, destination, date_from, date_to, hostel, room, outpass_type } = req.body;
     const { id: student_id } = req.user;
 
@@ -56,7 +57,7 @@ router.post('/apply', auth, async (req, res) => {
 });
 
 
-router.get('/my-outpasses', auth, async (req, res) => {
+router.get('/my-outpasses', auth, authorizeRoles('student'), async (req, res) => {
     const { id: student_id } = req.user;
 
     try {
@@ -80,7 +81,7 @@ router.get('/my-outpasses', auth, async (req, res) => {
 
 
 
-router.put('/update-complaint', auth, async (req, res) => {
+router.put('/update-complaint', auth, authorizeRoles('attendent', 'warden', 'chief-warden'), async (req, res) => {
     const { complaint_id, status } = req.body;
     const { id: attendant_id } = req.user;
 
@@ -112,7 +113,7 @@ router.put('/update-complaint', auth, async (req, res) => {
     }
 });
 
-router.put('/update-outpass', auth, async (req, res) => {
+router.put('/update-outpass', auth, authorizeRoles('attendent', 'warden', 'chief-warden'), async (req, res) => {
     const { outpass_id, status } = req.body;
     const { id: attendant_id } = req.user;
 
@@ -144,7 +145,7 @@ router.put('/update-outpass', auth, async (req, res) => {
     }
 });
 
-router.get('/by-hostel', auth, async (req, res) => {
+router.get('/by-hostel', auth, authorizeRoles('attendent', 'warden', 'chief-warden'), async (req, res) => {
     const { hostel } = req.query;
 
     if (!hostel) {
@@ -176,7 +177,7 @@ router.get('/by-hostel', auth, async (req, res) => {
 
 
 
-router.get('/all-approved', auth, async (req, res) => {
+router.get('/all-approved', auth, authorizeRoles('guard', 'attendent', 'warden', 'chief-warden'), async (req, res) => {
     try {
         const outpasses = await pool.query(
             `SELECT op.*, s.name as student_name, r.room_number as student_room, s.phone as student_phone, s.department, s.degree_type 
@@ -200,7 +201,7 @@ router.get('/all-approved', auth, async (req, res) => {
     }
 });
 
-router.get('/approved-by-hostel', auth, async (req, res) => {
+router.get('/approved-by-hostel', auth, authorizeRoles('guard', 'attendent', 'warden', 'chief-warden'), async (req, res) => {
     const { hostel } = req.query;
 
     if (!hostel) {
@@ -230,7 +231,7 @@ router.get('/approved-by-hostel', auth, async (req, res) => {
     }
 });
 
-router.put('/record-entry', auth, async (req, res) => {
+router.put('/record-entry', auth, authorizeRoles('guard', 'attendent', 'warden', 'chief-warden'), async (req, res) => {
     const { outpass_id, action, gate } = req.body;
     const { id: guard_id } = req.user;
 
@@ -276,7 +277,7 @@ router.put('/record-entry', auth, async (req, res) => {
     }
 });
 
-router.get('/monitor', async (req, res) => { 
+router.get('/monitor', auth, authorizeRoles('admin', 'chief-warden', 'warden', 'attendent', 'guard'), async (req, res) => { 
     try {
         const outpasses = await pool.query(
             `SELECT op.*, 
