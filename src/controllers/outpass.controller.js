@@ -1008,9 +1008,7 @@ PATCH /api/outpasses/:id/cancel
 =================================================
 */
 const cancelOutpass = asyncHandler(async (req, res) => {
-
     const { id } = req.params;
-
     const studentId = req.user?.id;
 
     if (!studentId) {
@@ -1030,7 +1028,6 @@ const cancelOutpass = asyncHandler(async (req, res) => {
     const client = await pool.connect();
 
     try {
-
         await client.query("BEGIN");
 
         const existingQuery = `
@@ -1062,13 +1059,15 @@ const cancelOutpass = asyncHandler(async (req, res) => {
             );
         }
 
-        if (outpass.outp_status !== "Pending") {
+        // Allow cancellation only if the outpass is Pending or Approved
+        if (!["Pending", "Approved"].includes(outpass.outp_status)) {
             throw new ApiError(
                 400,
-                "Only pending outpasses can be cancelled."
+                "Only pending or approved outpasses can be cancelled."
             );
         }
 
+        // Student has already left the campus
         if (outpass.std_status === "Out") {
             throw new ApiError(
                 400,
@@ -1102,16 +1101,12 @@ const cancelOutpass = asyncHandler(async (req, res) => {
         );
 
     } catch (error) {
-
         await client.query("ROLLBACK");
         throw error;
-
     } finally {
-
         client.release();
     }
 });
-
 /*
 =================================================
 GET PENDING OUTPASSES
